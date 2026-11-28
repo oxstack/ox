@@ -381,6 +381,43 @@ jobs:
           echo "OX_TEST_CLAUDE_BIN=${binary}" >> "${GITHUB_ENV}"
           echo "- Claude Code (${OX_CI_CLIENT_TRACK}) — ${actual_version}" >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Install stock OpenCode from the official release
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo=anomalyco/opencode
+          asset=opencode-linux-x64.tar.gz
+          release=tags/v1.19.5
+          if [ "${OX_CI_CLIENT_TRACK}" = latest ]; then
+            # Follow the stable alias for the OpenCode distribution used by
+            # this fixture. Other release lines can appear in the same repo.
+            release=latest
+          fi
+          metadata="$(gh api "repos/${repo}/releases/${release}")"
+          tag="$(jq -er '
+            select(.draft == false and .prerelease == false) | .tag_name
+            | select(test("^v[0-9]+[.][0-9]+[.][0-9]+$"))
+          ' <<< "${metadata}")"
+          sha256="$(jq -er --arg asset "${asset}" '
+            .assets[] | select(.name == $asset) | .digest
+            | select(test("^sha256:[0-9a-f]{64}$")) | ltrimstr("sha256:")
+          ' <<< "${metadata}")"
+          size="$(jq -er --arg asset "${asset}" '
+            .assets[] | select(.name == $asset) | .size | select(. > 0)
+          ' <<< "${metadata}")"
+          destination="$(mktemp -d "${RUNNER_TEMP}/opencode.XXXXXX")"
+          archive="${destination}/${asset}"
+          gh release download "${tag}" --repo "${repo}" --pattern "${asset}" --dir "${destination}"
+          test "$(stat -c %s "${archive}")" = "${size}"
+          echo "${sha256}  ${archive}" | sha256sum --check --strict
+          tar --extract --gzip --file "${archive}" --directory "${destination}" opencode
+          binary="${destination}/opencode"
+          actual_version="$("${binary}" --version)"
+          echo "OX_TEST_OPENCODE_BIN=${binary}" >> "${GITHUB_ENV}"
+          echo "- OpenCode (${OX_CI_CLIENT_TRACK}, ${tag}) — ${actual_version}" >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Disable paid and public inference for fixture steps
         run: |
           set -euo pipefail
@@ -396,6 +433,10 @@ jobs:
           done
           echo "NO_PROXY=127.0.0.1,localhost" >> "${GITHUB_ENV}"
           echo "no_proxy=127.0.0.1,localhost" >> "${GITHUB_ENV}"
+
+      - name: Run stock OpenCode loopback fixture
+        timeout-minutes: 5
+        run: python3 tests/fixtures/stock_opencode.py target/debug/ox "${OX_TEST_OPENCODE_BIN}"
 
       - name: Run stock Codex loopback fixtures
         timeout-minutes: 15
