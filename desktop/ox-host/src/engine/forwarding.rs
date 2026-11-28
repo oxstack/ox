@@ -420,24 +420,31 @@ impl Engine {
             return Err(e.to_string());
         }
         self.prepare_remote(job);
-        self.publish_forwarded(job).map_err(|e| e.to_string())?;
+        self.publish_forwarded(job);
         Ok(response)
     }
 
-    fn publish_forwarded(&mut self, id: u64) -> io::Result<()> {
+    fn publish_forwarded(&mut self, id: u64) {
         let parent = &self.ledger.data.forwarded[&id].origin.parent;
         let Some((scope, session)) = parent.scope.clone().zip(parent.session.clone()) else {
-            return Ok(());
+            return;
         };
-        if self.running.contains_key(&scope) {
-            self.process_scope(&scope, vec![], true)?;
+        let result = if self.running.contains_key(&scope) {
+            self.process_scope(&scope, vec![], true)
         } else if let Some(state) = self.cold.get_mut(&scope) {
             restore_roster(&self.ledger.data, state);
-            if let Some(session) = state.sessions.iter().find(|row| row.id == session).cloned() {
-                self.broadcast(&scope, vec![Change::Session { session }])?;
-            }
+            let Some(session) = state.sessions.iter().find(|row| row.id == session).cloned() else {
+                return;
+            };
+            self.broadcast(&scope, vec![Change::Session { session }])
+        } else {
+            return;
+        };
+        // Publish after commitment, without turning a committed launch or
+        // control action into an error when only its UI update fails.
+        if let Err(error) = result {
+            eprintln!("OX host: could not publish linked worker {id}: {error}");
         }
-        Ok(())
     }
     fn prepare_remote(&mut self, id: u64) {
         let j = self.ledger.data.forwarded[&id].clone();
@@ -585,7 +592,8 @@ impl Engine {
                 );
             }
         })?;
-        self.publish_forwarded(id)
+        self.publish_forwarded(id);
+        Ok(())
     }
     fn remote_control(&mut self, id: u64, call: ParentCall, reply: Option<Replier>) {
         let kind = match &call {
@@ -882,7 +890,7 @@ impl Engine {
             }
         })?;
         if self.ledger.data.forwarded[&id].roster_entry() != before {
-            self.publish_forwarded(id)?;
+            self.publish_forwarded(id);
         }
         if view["worker_changes_pending"] == true && view["worker_changes_error"].is_string() {
             self.forward
@@ -923,7 +931,7 @@ impl Engine {
                             j.status = "starting".into();
                             j.message = "Starting on the worker host.".into();
                         })?;
-                        self.publish_forwarded(id)?;
+                        self.publish_forwarded(id);
                         let _ = fs::remove_dir_all(queue.join("snapshot"));
                         self.send_remote(id, *start, Kind::Start, None);
                     }
@@ -1086,6 +1094,8 @@ mod tests {
                 .is_ok()
         );
         view["status"] = "completed".into();
+        // A failed projection write must not change the successful job reply.
+        engine.replay.cursor.seq = u64::MAX;
         assert!(
             engine
                 .accept_remote_reply(11, Kind::Status, view)
