@@ -19,6 +19,19 @@ decides.
   override with it. Example: a signed install refuses unsigned updates, and
   `OX_ALLOW_UNSIGNED=1` turns that off.
 
+## External tool versions
+
+- Use the executable already installed on the host when it supports the
+  requested operation. Check the capability or protocol the operation needs.
+  Use version strings for diagnostics and report missing capabilities clearly.
+- When OX manages a dependency download, default to the newest official stable
+  release whose release and matching platform artifact have been available for
+  at least 24 hours. Verify the published integrity metadata before using it.
+  Keep a working installation until its replacement is verified.
+- Keep exact tool versions out of runtime defaults and requirements. CI may use
+  a fixed compatibility reference alongside a lane that tracks the latest
+  stable release. Record the actual tool version in each lane.
+
 ## How a change reaches users
 
 1. **Every push to a pull request** runs the scoped fast checks, about 5

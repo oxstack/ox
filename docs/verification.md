@@ -131,8 +131,8 @@ python3 desktop/tests/host_antigravity_session.py /path/to/ox-host /path/to/ox /
 
 ### Standalone OpenCode
 
-With stock OpenCode 1.19.6 installed, run the local provider fixture against
-the candidate OX binary:
+Run the local provider fixture against the candidate OX binary and the installed
+OpenCode executable.
 
 ```sh
 cargo build --locked --bin ox
@@ -145,9 +145,9 @@ project and separate XDG roots. No live vendor account is required.
 
 ## Client updates
 
-ox launches the `codex` or `claude` executable on `PATH` with its launch-scoped
-provider settings and relay credential. Updating either client takes effect on
-the next launch.
+ox launches `codex`, `claude`, or `opencode` from `PATH` with launch-scoped
+provider settings and a relay credential. Client updates take effect on the
+next launch.
 
 The [CI workflow](https://github.com/oxstack/ox/actions/workflows/ci.yml)
 runs the same coding, tool, search, resume and auth scenarios against two inputs:
