@@ -16,11 +16,64 @@ use std::{
 pub type Size = (u16, u16);
 pub type Check = Box<dyn FnOnce() -> Result<(), String> + Send>;
 pub type Outcome = Result<Option<i32>, String>;
+pub type LineMatcher = Box<dyn Fn(&str) -> bool + Send>;
 pub struct Screen {
     pub parser: vt100::Parser,
     pub outcome: Option<Outcome>,
     /// Reported only to an operator viewing this PTY. Unknown modes are treated as private.
     pub echo: Option<bool>,
+    line_capture: Option<LineCapture>,
+    captured_line: Option<String>,
+}
+
+struct LineCapture {
+    matches: LineMatcher,
+    pending: Vec<u8>,
+    overflow: bool,
+}
+
+impl LineCapture {
+    fn process(&mut self, bytes: &[u8]) -> Option<String> {
+        const MAX_LINE_BYTES: usize = 8192;
+        for chunk in bytes.split_inclusive(|&b| b == b'\n') {
+            let line = chunk.strip_suffix(b"\n");
+            let data = line.unwrap_or(chunk);
+            if self.pending.len() + data.len() > MAX_LINE_BYTES {
+                self.overflow = true;
+            }
+            if !self.overflow {
+                self.pending.extend(data);
+            }
+            if line.is_some() {
+                if !self.overflow
+                    && let Ok(line) = std::str::from_utf8(&self.pending)
+                    && (self.matches)(line.trim())
+                {
+                    return Some(line.trim().to_owned());
+                }
+                self.pending.clear();
+                self.overflow = false;
+            }
+        }
+        None
+    }
+}
+
+impl Screen {
+    /// Read the first complete matching line as the process wrote it, before terminal wrapping.
+    pub fn take_captured_line(&mut self) -> Option<String> {
+        self.captured_line.take()
+    }
+
+    fn process(&mut self, bytes: &[u8]) {
+        self.parser.process(bytes);
+        if let Some(capture) = &mut self.line_capture
+            && let Some(line) = capture.process(bytes)
+        {
+            self.captured_line = Some(line);
+            self.line_capture = None;
+        }
+    }
 }
 
 struct Display {
@@ -41,6 +94,16 @@ impl Terminal {
         check: Check,
         size: Size,
     ) -> io::Result<(Self, Arc<Mutex<Screen>>, flume::Receiver<()>)> {
+        Self::start_with_line_capture(project, command, check, size, None)
+    }
+
+    pub fn start_with_line_capture(
+        project: PathBuf,
+        command: TerminalCommand,
+        check: Check,
+        size: Size,
+        matcher: Option<LineMatcher>,
+    ) -> io::Result<(Self, Arc<Mutex<Screen>>, flume::Receiver<()>)> {
         let (wake, mut listener) = UnixStream::pair()?;
         wake.set_nonblocking(true)?;
         listener.set_nonblocking(true)?;
@@ -50,6 +113,12 @@ impl Terminal {
             parser: vt100::Parser::new(size.0, size.1, 300),
             outcome: None,
             echo: None,
+            line_capture: matcher.map(|matches| LineCapture {
+                matches,
+                pending: Vec::new(),
+                overflow: false,
+            }),
+            captured_line: None,
         }));
         let terminal = Self {
             input,
@@ -393,7 +462,7 @@ fn pump(
         if fds[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
             match master.read(&mut buffer) {
                 Ok(n) if n > 0 => {
-                    screen.lock().unwrap().parser.process(&buffer[..n]);
+                    screen.lock().unwrap().process(&buffer[..n]);
                     let _ = changed.try_send(());
                     if fds[2].revents == 0 {
                         continue;
@@ -402,7 +471,7 @@ fn pump(
                     // Cap the tail in case a surviving background writer is still flooding the PTY.
                     for _ in 0..4 {
                         match master.read(&mut buffer) {
-                            Ok(n) if n > 0 => screen.lock().unwrap().parser.process(&buffer[..n]),
+                            Ok(n) if n > 0 => screen.lock().unwrap().process(&buffer[..n]),
                             _ => break,
                         }
                     }

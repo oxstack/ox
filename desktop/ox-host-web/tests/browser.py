@@ -972,6 +972,8 @@ def run(harness, screenshot=None):
             from key_copy import receiver
             copy_fixture = receiver(d, stack)
         source_env = dict(os.environ, **(copy_fixture[0] if copy_fixture else {}), DBUS_SESSION_BUS_ADDRESS="unix:path="+str(d/"no-session-bus"), SHELL="/bin/sh", GARDEN_TOKEN="fixture-env-token", HOME=str(isolated), CODEX_HOME=str(codex), CLAUDE_CONFIG_DIR=str(isolated/".claude"), XDG_STATE_HOME=str(isolated/"state"), XDG_CONFIG_HOME=str(isolated/"config"), OX_TEST_REMOTE_DIR=str(d))
+        from operator_browser import check_terminal, install_login_fixture
+        source_env["PATH"] = os.pathsep.join((str(install_login_fixture(d)), source_env.get("PATH", os.defpath)))
         # Provider catalogs may be requested after the synthetic cloud key is imported.
         # Only the local fixtures and the paired destination should be reachable.
         for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
@@ -1073,7 +1075,6 @@ def run(harness, screenshot=None):
 
         from notification_browser import check_notification_links
         check_notification_links(js, wait, host.scope)
-        from operator_browser import check_terminal
         check_terminal(js,admin,wait,d,host)
         # Source silhouettes stay stable across approvals, active work, billing routes, and nesting.
         icons=js("""return Object.fromEntries([...document.querySelectorAll('.session')].map(b=>[

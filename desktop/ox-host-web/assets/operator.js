@@ -29,6 +29,7 @@ export async function openPhoneTerminal(
     "antigravity-login": "Sign in to Antigravity",
   };
   const nativeLogin = ["codex-login", "claude-login", "antigravity-login"].includes(preset);
+  const antigravityLogin = preset === "antigravity-login";
   el("operator-title").textContent = title[preset] || "Terminal";
   el("operator-state").textContent = "Verifying terminal access…";
   const visibility = el("operator-visibility");
@@ -230,10 +231,16 @@ export async function openPhoneTerminal(
         screen.textContent = f.screen;
         screen.scrollTop = screen.scrollHeight;
         if (nativeLogin) {
-          for (const m of f.screen.matchAll(/https:\/\/[^\s<>"']+/g)) {
+          // Antigravity prints a long OAuth URL. The host supplies the complete
+          // line separately from the terminal's wrapped screen.
+          const candidates = antigravityLogin
+            ? [f.login_url]
+            : f.screen.match(/https:\/\/[^\s<>"']+/g) ?? [];
+          for (const candidate of candidates) {
+            if (typeof candidate !== "string") continue;
             let url;
             try {
-              url = new URL(m[0]);
+              url = new URL(candidate);
             } catch {
               continue;
             }
@@ -241,16 +248,17 @@ export async function openPhoneTerminal(
               preset === "codex-login"
                 ? url.origin === "https://auth.openai.com" &&
                   url.pathname === "/codex/device"
-                : preset === "antigravity-login"
+                : antigravityLogin
                   ? url.origin === "https://accounts.google.com" &&
-                    ["/o/oauth2/v2/auth", "/o/oauth2/auth"].includes(url.pathname)
+                    ["/o/oauth2/v2/auth", "/o/oauth2/auth"].includes(url.pathname) &&
+                    url.search && !url.hash
                   : [
                     "https://claude.ai",
                     "https://platform.claude.com",
                     "https://console.anthropic.com",
                   ].includes(url.origin) && url.pathname.includes("/oauth/");
             if (native && !url.username && !url.password) {
-              el("operator-link").href = url.href;
+              el("operator-link").href = antigravityLogin ? candidate : url.href;
               el("operator-link").hidden = false;
               break;
             }

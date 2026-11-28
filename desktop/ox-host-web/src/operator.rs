@@ -78,6 +78,21 @@ async fn send(ws: &mut WebSocket, v: Value) -> bool {
 fn allowed(app: &App, id: &str, generation: u64) -> bool {
     app.state.lock().unwrap().terminal_generation(id) == Some(generation)
 }
+
+fn google_login_url(line: &str) -> bool {
+    line.bytes().all(|byte| byte.is_ascii_graphic())
+        && url::Url::parse(line).is_ok_and(|url| {
+            url.scheme() == "https"
+                && url.host_str() == Some("accounts.google.com")
+                && url.port().is_none()
+                && matches!(url.path(), "/o/oauth2/auth" | "/o/oauth2/v2/auth")
+                && url.query().is_some_and(|query| !query.is_empty())
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.fragment().is_none()
+        })
+}
+
 async fn project(app: &App, requested: Option<&Path>) -> Option<PathBuf> {
     let Some(path) = requested else {
         return std::env::var_os("HOME")
@@ -134,6 +149,8 @@ async fn operator(app: App, id: String, mut ws: WebSocket) {
         return;
     };
     let mut lease = None;
+    let login_matcher = matches!(request.preset, Preset::AntigravityLogin)
+        .then(|| Box::new(google_login_url) as ox_pty::LineMatcher);
     let (cwd, mut cmd) = match request.preset {
         Preset::NativeSession => {
             let (Some(scope), Some(thread), None) =
@@ -268,7 +285,7 @@ async fn operator(app: App, id: String, mut ws: WebSocket) {
     }
     let check = app.clone();
     let owner = id.clone();
-    let Ok((pty, screen, events)) = Terminal::start(
+    let Ok((pty, screen, events)) = Terminal::start_with_line_capture(
         cwd,
         cmd,
         Box::new(move || {
@@ -277,6 +294,7 @@ async fn operator(app: App, id: String, mut ws: WebSocket) {
                 .ok_or_else(|| "Terminal access was disabled.".into())
         }),
         (24, 80),
+        login_matcher,
     ) else {
         send(
             &mut ws,
@@ -313,8 +331,15 @@ async fn operator(app: App, id: String, mut ws: WebSocket) {
             },
             update=events.recv_async()=>{
                 if update.is_err() || !allowed(&app,&id,generation){break;}
-                let (text,echo,outcome)={let view=screen.lock().unwrap();(view.parser.screen().contents(),view.echo,view.outcome.clone())};
-                if !send(&mut ws,json!({"screen":text,"echo":echo})).await{break;}
+                let (frame, outcome) = {
+                    let mut view = screen.lock().unwrap();
+                    let mut frame = json!({"screen":view.parser.screen().contents(),"echo":view.echo});
+                    if let Some(url) = view.take_captured_line() {
+                        frame["login_url"] = url.into();
+                    }
+                    (frame, view.outcome.clone())
+                };
+                if !send(&mut ws, frame).await { break; }
                 if let Some(result)=outcome{
                     match result{
                         Ok(code)=>{send(&mut ws,json!({"exit":code})).await;}
