@@ -4,6 +4,8 @@ Run this on the host serving your development app. OX installs its browser compo
 
 Run `ox browser install` again to refresh the component. It checks the official `vercel-labs/agent-browser` releases and verifies the checksum and size of the binary for your platform. The stable release and its binary must both be at least 24 hours old. The wait gives maintainers and users time to find and withdraw a bad or compromised binary before it runs on your machine. For an urgent fix, `ox browser install --allow-fresh` skips the wait and keeps the other checks. Other browser commands use the installed component and never check for updates. Open sessions keep the component that started them. Close and reopen a session to use the refreshed version.
 
+During installation, OX can copy a matching native `agent-browser` from your `PATH`, including the native binary behind npm's standard launcher. OX verifies the copy against official release metadata and stores it privately. If OX needs a copy and finds no match locally, it downloads the verified release binary.
+
 ```sh
 ox browser install
 ox browser open http://localhost:3000
