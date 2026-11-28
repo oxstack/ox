@@ -158,6 +158,9 @@ with tempfile.TemporaryDirectory(prefix="ox-stock-opencode-") as name, Threading
         "XDG_CACHE_HOME": str(root / "native-cache"),
         "XDG_STATE_HOME": str(root / "native-state"),
     }
+    for name in ("http_proxy", "https_proxy", "all_proxy"):
+        env[name] = env[name.upper()] = "http://127.0.0.1:1"
+    env["no_proxy"] = env["NO_PROXY"] = "127.0.0.1,localhost"
     config = ""
     for route, wire in [("messages", "anthropic_messages"), ("responses", "responses"),
                         ("chat", "chat_completions")]:

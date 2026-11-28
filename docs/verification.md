@@ -152,17 +152,19 @@ the next launch.
 The [CI workflow](https://github.com/oxstack/ox/actions/workflows/ci.yml)
 runs the same coding, tool, search, resume and auth scenarios against two inputs:
 
-- **Baseline** uses checksum-pinned Codex 0.171.0 and Claude Code 2.1.330 on PRs and
-  pushes to `main`. It keeps a repeatable compatibility reference.
-- **Latest** downloads the current official Codex release and Claude Code’s `latest`
-  channel using their published SHA-256 values. It runs on PRs, pushes to `main`,
-  and daily on the default branch. Each run records the resolved versions in its job
-  summary. Use **Run workflow** to check for a new upstream release on demand.
+- **Baseline** verifies Codex 0.171.0, Claude Code 2.1.330, and OpenCode 1.19.5
+  against published checksums on PRs and pushes to `main`. It keeps a repeatable
+  compatibility reference.
+- **Latest** tracks the official release channels of Codex, Claude Code, and
+  OpenCode. The OpenCode job follows its official GitHub `latest` release
+  alias. This track runs on PRs, pushes to `main`, and daily on the default
+  branch. Both tracks record the installed versions in the job summary.
+  Use **Run workflow** to check for a new upstream release on demand.
 
 A fixture that fails against a new client turns that job red. Check the Actions
 logs for the failing scenario and client version. To reproduce with your installed
-client, replace the fixture paths above with the output of `command -v codex` or
-`command -v claude`. The tests exercise the behavior of the supplied binary.
+client, pass the installed executable to the corresponding fixture. The tests
+exercise the behavior of the supplied binary.
 
 Enable **Actions → Only notify for failed workflows** in your GitHub notification
 settings for failure alerts. GitHub sends scheduled-run notifications to the account
