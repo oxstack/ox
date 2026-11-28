@@ -104,7 +104,7 @@ def local_tool_terminal(window, provider, root, project):
     open_transcript_find(window)
     window.text("fixture-failed")
     try:
-        window.word("Run", same_row="terminal", click=True)
+        window.press("Run in OX terminal")
     except AssertionError:
         capture(window, "run")
         raise

@@ -6,16 +6,33 @@ use crate::{
     kit::{button, col, row, small},
 };
 use gpui::{prelude::FluentBuilder, *};
+use gpui_component::input::RopeExt;
 use ox_desk_core::actions::Action;
 use std::collections::HashMap;
 mod patch;
-use patch::Cursor;
+use patch::{Cursor, Excerpt, Selection};
+
+type FileKey = (String, String, String);
+
+struct FileSelection {
+    key: FileKey,
+    range: Option<Selection>,
+}
 
 #[derive(Default)]
 pub(super) struct ReviewPane {
     pub(super) open: bool,
     pinned: HashMap<String, String>,
-    expanded: HashMap<(String, String, String), Vec<Cursor>>,
+    expanded: HashMap<FileKey, Vec<Cursor>>,
+    selection: Option<FileSelection>,
+}
+
+impl ReviewPane {
+    fn clear_range(&mut self, key: &FileKey) {
+        if let Some(selection) = self.selection.as_mut().filter(|s| &s.key == key) {
+            selection.range = None;
+        }
+    }
 }
 
 impl Workbench {
@@ -29,6 +46,7 @@ impl Workbench {
             .is_some_and(|s| s.selected().and_then(|id| s.transcript(id)).is_some())
         {
             self.review.open = !self.review.open;
+            self.review.selection = None;
             self.review_layout_changed(cx);
             cx.notify();
         }
@@ -87,6 +105,7 @@ impl Workbench {
                         "Close changes and plan",
                         cx.listener(|s, _, _, cx| {
                             s.review.open = false;
+                            s.review.selection = None;
                             s.review_layout_changed(cx);
                             cx.notify();
                         }),
@@ -146,6 +165,7 @@ impl Workbench {
                     false,
                     target.is_some(),
                     cx.listener(move |s, _, _, cx| {
+                        s.review.selection = None;
                         match &pin {
                             Some(turn) => {
                                 s.review.pinned.insert(thread.clone(), turn.clone());
@@ -233,6 +253,7 @@ impl Workbench {
                     )),
             );
         }
+        let mut selection_bar = None;
         for (index, (path, patches)) in files.into_iter().enumerate() {
             let key = (owner.to_owned(), turn.to_owned(), path.to_owned());
             let pages = self.review.expanded.get(&key);
@@ -252,6 +273,7 @@ impl Workbench {
                 .child(
                     row()
                         .gap_2()
+                        .flex_wrap()
                         .justify_between()
                         .child(
                             button(
@@ -263,6 +285,13 @@ impl Workbench {
                                 cx.listener(move |s, _, _, cx| {
                                     if s.review.expanded.remove(&toggle_key).is_none() {
                                         s.review.expanded.insert(toggle_key.clone(), Vec::new());
+                                    } else if s
+                                        .review
+                                        .selection
+                                        .as_ref()
+                                        .is_some_and(|selection| selection.key == toggle_key)
+                                    {
+                                        s.review.selection = None;
                                     }
                                     cx.notify();
                                 }),
@@ -289,21 +318,128 @@ impl Workbench {
                         )),
                 );
             if let Some(pages) = pages {
-                let page = patch::page(&patches, pages.last().copied().unwrap_or_default());
-                for line in page.lines {
-                    let color = match line.as_bytes().first() {
+                let page = patch::page(&patches, pages.last().cloned().unwrap_or_default());
+                let selecting = self.review.selection.as_ref().filter(|s| s.key == key);
+                if let Some(selection) = selecting {
+                    let excerpt = selection
+                        .range
+                        .as_ref()
+                        .and_then(|range| range.excerpt(&patches, &page.lines));
+                    selection_bar = Some(Self::review_selection_bar(
+                        p,
+                        &key,
+                        path_label,
+                        selection.range.is_some(),
+                        excerpt,
+                        cx,
+                    ));
+                }
+                if page.lines.iter().any(|line| line.location.is_some()) {
+                    let selection_key = key.clone();
+                    file = file.child(
+                        row().child(
+                            crate::kit::toolbar_button(
+                                p,
+                                ("select-review-lines", index),
+                                if selecting.is_some() {
+                                    "Selecting lines"
+                                } else {
+                                    "Select lines"
+                                },
+                                true,
+                                cx.listener(move |s, _, _, cx| {
+                                    if s.store.as_ref().and_then(|store| store.selected())
+                                        != Some(selection_key.0.as_str())
+                                    {
+                                        return;
+                                    }
+                                    if s.review
+                                        .selection
+                                        .as_ref()
+                                        .is_some_and(|selection| selection.key == selection_key)
+                                    {
+                                        s.review.selection = None;
+                                    } else {
+                                        s.review.selection = Some(FileSelection {
+                                            key: selection_key.clone(),
+                                            range: None,
+                                        });
+                                    }
+                                    cx.notify();
+                                }),
+                            )
+                            .when(selecting.is_some(), |b| {
+                                b.bg(rgb(p.hover)).tooltip("Exit line selection")
+                            }),
+                        ),
+                    );
+                }
+                for (line_index, line) in page.lines.into_iter().enumerate() {
+                    let color = match line.text.as_bytes().first() {
                         Some(b'+') => p.accent,
                         Some(b'-') => p.error,
                         Some(b'@') => p.warning,
                         _ => p.fg,
                     };
+                    let content = div()
+                        .w_full()
+                        .min_w_0()
+                        .font_family("monospace")
+                        .text_size(p.text(Step::Meta))
+                        .text_color(rgb(color))
+                        .child(line.text);
+                    let Some(selecting) = selecting else {
+                        file = file.child(content);
+                        continue;
+                    };
+                    let selected = selecting
+                        .range
+                        .as_ref()
+                        .zip(line.location.as_ref())
+                        .is_some_and(|(range, line)| range.includes(&patches, line));
+                    let gutter = if let Some(location) = line.location {
+                        let description = location.description();
+                        let source = location.source(&patches).clone();
+                        let selection_key = key.clone();
+                        crate::kit::toolbar_button(
+                            p,
+                            SharedString::from(format!("review-line-{index}-{line_index}")),
+                            location.label(),
+                            true,
+                            cx.listener(move |s, _, _, cx| {
+                                if let Some(selection) = s
+                                    .review
+                                    .selection
+                                    .as_mut()
+                                    .filter(|selection| selection.key == selection_key)
+                                {
+                                    selection.range = Some(Selection::select(
+                                        selection.range.take(),
+                                        source.clone(),
+                                        location.clone(),
+                                    ));
+                                    cx.notify();
+                                }
+                            }),
+                        )
+                        .accessibility_label(description)
+                        .font_family("monospace")
+                        .text_size(p.text(Step::Meta))
+                        .w(px(46.))
+                        .flex_shrink_0()
+                        .h(px(21.))
+                        .px_1()
+                        .text_color(rgb(color))
+                        .into_any_element()
+                    } else {
+                        div().w(px(46.)).flex_shrink_0().into_any_element()
+                    };
                     file = file.child(
-                        div()
-                            .w_full()
-                            .font_family("monospace")
-                            .text_size(p.text(Step::Meta))
-                            .text_color(rgb(color))
-                            .child(line),
+                        row()
+                            .items_start()
+                            .when(selected, |line| line.bg(rgb(p.hover)).rounded_sm())
+                            .child(gutter)
+                            .child(content),
                     );
                 }
                 if page.next.is_some() || !pages.is_empty() {
@@ -321,6 +457,7 @@ impl Workbench {
                                     if let Some(stack) = s.review.expanded.get_mut(&back) {
                                         stack.pop();
                                     }
+                                    s.review.clear_range(&back);
                                     cx.notify()
                                 }),
                             ))
@@ -332,10 +469,11 @@ impl Workbench {
                                 page.next.is_some(),
                                 cx.listener(move |s, _, _, cx| {
                                     if let (Some(stack), Some(next)) =
-                                        (s.review.expanded.get_mut(&key), page.next)
+                                        (s.review.expanded.get_mut(&key), page.next.clone())
                                     {
                                         stack.push(next);
                                     }
+                                    s.review.clear_range(&key);
                                     cx.notify()
                                 }),
                             )),
@@ -344,6 +482,145 @@ impl Workbench {
             }
             pane = pane.child(file);
         }
-        Some(pane.into_any_element())
+        Some(if let Some(bar) = selection_bar {
+            col()
+                .size_full()
+                .min_h_0()
+                .child(pane.flex_1().min_h_0())
+                .child(bar)
+                .into_any_element()
+        } else {
+            pane.into_any_element()
+        })
+    }
+
+    fn review_selection_bar(
+        p: Palette,
+        key: &FileKey,
+        path_label: &str,
+        had_range: bool,
+        excerpt: Option<Excerpt>,
+        cx: &Context<Self>,
+    ) -> Div {
+        let key = key.clone();
+        let path_label = path_label.to_owned();
+        let instruction = match &excerpt {
+            Some(_) => "Choose an end line in this hunk, or add the selection.",
+            None if had_range => "The diff changed. Select a line again.",
+            None => "Choose the first line.",
+        };
+        col()
+            .gap_1()
+            .flex_shrink_0()
+            .border_t_1()
+            .border_color(rgb(p.line))
+            .bg(rgb(p.panel))
+            .px_3()
+            .py_2()
+            .when_some(excerpt.as_ref(), |bar, excerpt| {
+                bar.child(small(p, excerpt.label.clone()))
+            })
+            .child(small(p, instruction))
+            .child(
+                row()
+                    .gap_1()
+                    .flex_wrap()
+                    .child(button(
+                        p,
+                        "add-review-to-composer",
+                        "Add to composer",
+                        false,
+                        excerpt.is_some(),
+                        cx.listener(move |s, _, window, cx| {
+                            if let Some(excerpt) = &excerpt {
+                                s.add_review_excerpt(&key, &path_label, excerpt, window, cx);
+                            }
+                        }),
+                    ))
+                    .child(crate::kit::toolbar_button(
+                        p,
+                        "clear-review-selection",
+                        "Start over",
+                        had_range,
+                        cx.listener(|s, _, _, cx| {
+                            if let Some(selection) = s.review.selection.as_mut() {
+                                selection.range = None;
+                                cx.notify();
+                            }
+                        }),
+                    ))
+                    .child(crate::kit::toolbar_button(
+                        p,
+                        "cancel-review-selection",
+                        "Cancel",
+                        true,
+                        cx.listener(|s, _, _, cx| {
+                            s.review.selection = None;
+                            cx.notify();
+                        }),
+                    )),
+            )
+    }
+
+    fn add_review_excerpt(
+        &mut self,
+        key: &FileKey,
+        path_label: &str,
+        excerpt: &Excerpt,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        if store.selected() != Some(key.0.as_str()) {
+            return;
+        }
+        let range = self
+            .review
+            .selection
+            .as_ref()
+            .filter(|selection| &selection.key == key)
+            .and_then(|selection| selection.range.as_ref());
+        let current = store
+            .transcript(&key.0)
+            .and_then(|thread| thread.reviews.get(&key.1))
+            .and_then(|turn| {
+                turn.file_groups()
+                    .into_iter()
+                    .find(|(path, _)| *path == key.2)
+            });
+        if !current.is_some_and(|(_, patches)| excerpt.matches(&patches, range)) {
+            cx.notify();
+            return;
+        }
+        let owner = Some(key.0.clone());
+        let current_draft = store.draft(owner.as_deref());
+        let draft = excerpt.append_to(current_draft.to_owned(), path_label);
+        // Preserve editor tokens and make the insertion undoable. The existing draft action
+        // also covers an unmounted editor.
+        if let Some(editor) = self.editors.get(&owner)
+            && editor.read(cx).value().as_ref() == current_draft
+        {
+            let position = editor
+                .read(cx)
+                .text()
+                .offset_to_position(current_draft.len());
+            let insertion = draft[current_draft.len()..].to_owned();
+            editor.update(cx, |input, cx| {
+                if input.marked_text_range(window, cx).is_none() {
+                    input.set_cursor_position(position, window, cx);
+                    input.insert(insertion, window, cx);
+                }
+            });
+        }
+        self.review.selection = None;
+        // Narrow layouts show the review instead of the composer.
+        if self.pane_width - px(self.review_width as f32 + 5.) < px(500.) {
+            self.review.open = false;
+            self.review_layout_changed(cx);
+        }
+        self.focus_editor_for = Some(owner.clone());
+        self.action(cx, Action::DraftEdit(owner, draft));
     }
 }
