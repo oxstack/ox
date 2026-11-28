@@ -40,6 +40,7 @@ fn partitions_by_host_project_and_billing_route() {
 struct Exchange {
     method: &'static str,
     path: &'static str,
+    authenticated: bool,
     status: &'static str,
     headers: &'static str,
     request: Option<Value>,
@@ -51,6 +52,7 @@ fn json_reply(method: &'static str, path: &'static str, body: Value) -> Exchange
         method,
         path,
         status: "200 OK",
+        authenticated: true,
         headers: "Content-Type: application/json",
         request: None,
         reply: body.to_string(),
@@ -108,7 +110,7 @@ fn listen(owner: Owner, exchanges: Vec<Exchange>) -> (SocketAddrV4, thread::Join
                     }
                 }
             }
-            assert!(authorized);
+            assert_eq!(authorized, exchange.authenticated);
             if let Some(expected) = exchange.request {
                 let mut body = vec![0; length];
                 reader.read_exact(&mut body).unwrap();
@@ -133,7 +135,7 @@ fn startup(profile: &Profile) -> Vec<Exchange> {
         json_reply(
             "GET",
             "/global/health",
-            json!({"healthy": true, "version": VERSION}),
+            json!({"healthy": true, "version": "fixture-other-version"}),
         ),
         json_reply(
             "GET",
@@ -144,6 +146,13 @@ fn startup(profile: &Profile) -> Vec<Exchange> {
                 "config": profile.config_home().join("opencode"),
             }),
         ),
+        json_reply("GET", "/session/status", json!({})),
+        Exchange {
+            authenticated: false,
+            status: "401 Unauthorized",
+            ..json_reply("GET", "/session/status", Value::Null)
+        },
+        json_reply("GET", "/permission", json!([])),
         json_reply(
             "POST",
             "/session",
@@ -155,7 +164,7 @@ fn startup(profile: &Profile) -> Vec<Exchange> {
 }
 
 #[test]
-fn scopes_actions_history_and_stream_to_a_registered_session() {
+fn accepts_a_different_version_with_the_same_scoped_session_contract() {
     let tmp = private_tempdir();
     let project = tmp.path().join("project #1");
     std::fs::create_dir(&project).unwrap();
@@ -182,7 +191,7 @@ fn scopes_actions_history_and_stream_to_a_registered_session() {
     history.headers = "Content-Type: application/json\r\nX-Next-Cursor: previous";
     script.push(history);
     script.push(Exchange {
-        method: "GET", path: "/event", status: "200 OK", headers: "Content-Type: text/event-stream", request: None,
+        method: "GET", path: "/event", status: "200 OK", headers: "Content-Type: text/event-stream", request: None, authenticated: true,
         reply: concat!(
             "data: {\"id\":\"evt_connected\",\"type\":\"server.connected\",\"properties\":{}}\n\n",
             "data: {\"id\":\"evt_other\",\"type\":\"message.part.delta\",\"properties\":{\"sessionID\":\"ses_other\"}}\n\n",
@@ -224,7 +233,7 @@ fn requires_the_owning_child_profile() {
     let intended = Profile::prepare(tmp.path(), scope.clone()).unwrap();
     let foreign = Profile::prepare(other_state.path(), scope.clone()).unwrap();
     let mut script = startup(&foreign);
-    script.pop();
+    script.truncate(2);
     let (address, server) = listen(scope, script);
     assert!(matches!(
         Adapter::connect(intended, address, "secret".into()),
@@ -260,7 +269,10 @@ fn fences_an_ambiguous_stop_until_the_exact_stale_ask_is_gone() {
     let session = adapter.create(&scope, "test").unwrap();
     assert!(matches!(
         adapter.cancel(&scope, &session),
-        Err(Error::NativeStatus(StatusCode::INTERNAL_SERVER_ERROR))
+        Err(Error::NativeStatus {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            ..
+        })
     ));
     assert!(matches!(
         adapter.push_text(&scope, &session, "msg_1", "hello"),
@@ -275,5 +287,62 @@ fn fences_an_ambiguous_stop_until_the_exact_stale_ask_is_gone() {
         adapter.answer(&scope, &session, "per_other", Decision::AllowOnce),
         Err(Error::UnknownPermission)
     ));
+    server.join().unwrap();
+}
+
+#[test]
+fn reports_the_missing_authenticated_status_operation() {
+    let root = private_tempdir();
+    let scope = owner(root.path(), "host", "provider/model");
+    let profile = Profile::prepare(root.path(), scope.clone()).unwrap();
+    let mut script = startup(&profile);
+    script.truncate(3);
+    script[2].status = "404 Not Found";
+    let (address, server) = listen(scope, script);
+    let error = Adapter::connect(profile, address, "secret".into())
+        .err()
+        .unwrap();
+    assert_eq!(
+        error.to_string(),
+        "OpenCode could not read session status (HTTP 404 Not Found)"
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn reports_an_incompatible_permissions_reply() {
+    let root = private_tempdir();
+    let scope = owner(root.path(), "host", "provider/model");
+    let profile = Profile::prepare(root.path(), scope.clone()).unwrap();
+    let mut script = startup(&profile);
+    script.truncate(5);
+    script[4].reply = json!({"permissions": []}).to_string();
+    let (address, server) = listen(scope, script);
+    let error = Adapter::connect(profile, address, "secret".into())
+        .err()
+        .unwrap();
+    assert_eq!(
+        error.to_string(),
+        "Installed OpenCode returned an incompatible response while attempting to list pending permissions"
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn requires_authentication_for_session_status() {
+    let root = private_tempdir();
+    let scope = owner(root.path(), "host", "provider/model");
+    let profile = Profile::prepare(root.path(), scope.clone()).unwrap();
+    let mut script = startup(&profile);
+    script.truncate(4);
+    script[3].status = "200 OK";
+    let (address, server) = listen(scope, script);
+    let error = Adapter::connect(profile, address, "secret".into())
+        .err()
+        .unwrap();
+    assert_eq!(
+        error.to_string(),
+        "Installed OpenCode did not require authentication for session status"
+    );
     server.join().unwrap();
 }

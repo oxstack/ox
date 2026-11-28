@@ -1,4 +1,4 @@
-"""Verify the host-owned controller with pinned stock OpenCode and a local fixture.
+"""Verify the host-owned controller with stock OpenCode and a local fixture.
 
 Build `cargo test --manifest-path desktop/Cargo.toml -p ox-host --test opencode_stock_runtime --no-run`.
 Run `python3 desktop/tests/opencode_host_runtime.py STOCK OX TEST_BINARY` with its reported executable.
@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 
-from opencode_host_contract import MODEL, Provider, VERSION
+from opencode_host_contract import MODEL, Provider, report_version
 
 
 class RuntimeProvider(Provider):
@@ -57,7 +57,7 @@ class RuntimeProvider(Provider):
 
 
 def run(stock, ox, test):
-    assert subprocess.check_output([stock, "--version"], text=True).strip() == VERSION
+    report_version(stock)
     with tempfile.TemporaryDirectory(prefix="ox-opencode-runtime-") as temp, \
             ThreadingHTTPServer(("127.0.0.1", 0), RuntimeProvider) as provider:
         root = Path(temp).resolve()

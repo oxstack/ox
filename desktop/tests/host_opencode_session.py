@@ -1,6 +1,6 @@
 """Exercise a host-owned OpenCode session through the authenticated OX socket.
 
-Run with pinned stock OpenCode, a built OX gateway, and a built OX session host.
+Run with stock OpenCode, a built OX gateway, and a built OX session host.
 python3 desktop/tests/host_opencode_session.py STOCK OX OX_HOST
 """
 
@@ -11,7 +11,6 @@ import json
 import os
 from pathlib import Path
 import secrets
-import subprocess
 import tempfile
 import threading
 import time
@@ -19,7 +18,7 @@ import uuid
 
 from host_antigravity_session import Client, ready, response, setup, snapshot
 from host_fixture import session_host
-from opencode_host_contract import MODEL, VERSION
+from opencode_host_contract import MODEL, report_version
 from opencode_host_runtime import RuntimeProvider
 
 
@@ -247,7 +246,7 @@ def main():
         parser.add_argument(arg, type=Path)
     args = parser.parse_args()
     stock, ox, host = (getattr(args, k).resolve(strict=True) for k in ("stock", "ox", "host"))
-    assert subprocess.check_output([stock, "--version"], text=True).strip() == VERSION
+    report_version(stock)
     with tempfile.TemporaryDirectory(prefix="ox-host-opencode-") as temp, \
             ThreadingHTTPServer(("127.0.0.1", 0), Provider) as provider:
         service = threading.Thread(target=provider.serve_forever, daemon=True)

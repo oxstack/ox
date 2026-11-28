@@ -19,7 +19,7 @@ from http.server import ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 from host_fixture import descendants, wait_gone
-from opencode_host_contract import Api, Events, MODEL, Provider, VERSION, process, wait
+from opencode_host_contract import Api, Events, MODEL, Provider, process, report_version, wait
 
 
 class CredentialProvider(Provider):
@@ -133,7 +133,7 @@ def run(ox, opencode, root, provider):
             api = Api(endpoint.geturl(), ready["password"], project)
             assert api.read("/global/health", authenticate=False, status=401) is None
             assert Api(endpoint.geturl(), "old-password", project).read("/global/health", status=401) is None
-            assert api.read("/global/health") == {"healthy": True, "version": VERSION}
+            assert api.read("/global/health")["healthy"] is True
             paths = api.read("/path")
             assert paths["directory"] == str(project)
             assert paths["config"] == str(profile / "config/opencode")
@@ -194,7 +194,7 @@ def main():
     parser.add_argument("ox", type=Path)
     args = parser.parse_args()
     opencode, ox = (path.resolve(strict=True) for path in (args.opencode, args.ox))
-    assert subprocess.check_output([opencode, "--version"], text=True).strip() == VERSION
+    report_version(opencode)
     with tempfile.TemporaryDirectory(prefix="ox-opencode-bootstrap-") as temp, \
             ThreadingHTTPServer(("127.0.0.1", 0), CredentialProvider) as provider:
         provider.key = secrets.token_urlsafe(24)

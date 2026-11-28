@@ -163,11 +163,12 @@ async fn read_launch(input: &mut (impl AsyncRead + Unpin)) -> io::Result<Launch>
 
 async fn assigned_address(output: &mut (impl AsyncRead + Unpin)) -> io::Result<SocketAddrV4> {
     let mut output = BufReader::new(output).take(16 * 1024);
-    let mut line = String::new();
-    while output.read_line(&mut line).await? != 0 {
+    let mut line_buffer = String::new();
+    while output.read_line(&mut line_buffer).await? != 0 {
+        let line = line_buffer.trim();
         if let Some(address) = line
-            .trim()
             .strip_prefix("opencode server listening on http://")
+            .or_else(|| line.strip_prefix("server listening on http://"))
         {
             let address: SocketAddrV4 = address
                 .parse()
@@ -177,9 +178,45 @@ async fn assigned_address(output: &mut (impl AsyncRead + Unpin)) -> io::Result<S
             }
             break;
         }
-        line.clear();
+        line_buffer.clear();
     }
     Err(io::Error::other(
         "OpenCode failed to report its assigned loopback endpoint",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn accepts_the_observed_stock_listening_banners() {
+        for mut banner in [
+            b"opencode server listening on http://127.0.0.1:4123
+"
+            .as_slice(),
+            b"server listening on http://127.0.0.1:4123
+"
+            .as_slice(),
+        ] {
+            assert_eq!(
+                assigned_address(&mut banner).await.unwrap(),
+                "127.0.0.1:4123".parse().unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn requires_an_assigned_ipv4_loopback_port() {
+        for mut banner in [
+            b"server listening on http://0.0.0.0:4123
+"
+            .as_slice(),
+            b"server listening on http://127.0.0.1:0
+"
+            .as_slice(),
+        ] {
+            assert!(assigned_address(&mut banner).await.is_err());
+        }
+    }
 }

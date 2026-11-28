@@ -53,7 +53,7 @@ fn terminal(runtime: &mut RouteRuntime, owner: &Owner, id: Uuid) -> Snapshot {
 }
 
 #[test]
-#[ignore = "requires the pinned stock OpenCode binary and the loopback gateway fixture"]
+#[ignore = "requires a stock OpenCode binary and the loopback gateway fixture"]
 fn reconciles_stock_sessions_approvals_and_restart() {
     let path = |name: &str| PathBuf::from(env::var_os(name).unwrap());
     let ox = path("OX_TEST_OPENCODE_GATEWAY");

@@ -1,4 +1,4 @@
-//! The pinned stock OpenCode HTTP contract. Use on an I/O worker. An SSE
+//! The stock OpenCode HTTP contract used by the OX host. Use on an I/O worker. An SSE
 //! subscription is live only; a caller must reconcile history and approvals
 //! after disconnect. The OX host owns the durable session registry.
 
@@ -15,7 +15,7 @@ pub use profile::{Owner, Profile};
 
 use reqwest::{
     Method, StatusCode, Url,
-    blocking::{Client, Response},
+    blocking::{Client, RequestBuilder, Response},
     redirect::Policy,
 };
 use serde::{Deserialize, de::DeserializeOwned};
@@ -30,7 +30,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const VERSION: &str = "1.19.6";
 pub(super) const MAX_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PAGE: usize = 100;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -42,8 +41,11 @@ pub enum Error {
     OwnerMismatch,
     InvalidInput(&'static str),
     InvalidResponse(&'static str),
-    NativeStatus(StatusCode),
-    UnsupportedVersion(String),
+    NativeStatus {
+        operation: &'static str,
+        status: StatusCode,
+    },
+    IncompatibleReply(&'static str),
     BlockedByCancellation,
     UnknownSession,
     TurnInProgress,
@@ -63,11 +65,15 @@ impl fmt::Display for Error {
                 out.write_str("OpenCode session belongs to another host, project, or billing route")
             }
             Self::InvalidInput(detail) | Self::InvalidResponse(detail) => out.write_str(detail),
-            Self::NativeStatus(status) => write!(out, "OpenCode returned HTTP {status}"),
-            Self::UnsupportedVersion(version) => write!(
-                out,
-                "OpenCode {VERSION} is required for this adapter, found {version}"
-            ),
+            Self::NativeStatus { operation, status } => {
+                write!(out, "OpenCode could not {operation} (HTTP {status})")
+            }
+            Self::IncompatibleReply(operation) => {
+                write!(
+                    out,
+                    "Installed OpenCode returned an incompatible response while attempting to {operation}"
+                )
+            }
             Self::BlockedByCancellation => {
                 out.write_str("OpenCode cancellation is still being reconciled")
             }
@@ -202,20 +208,34 @@ impl Adapter {
             profile,
             fenced: HashSet::new(),
         };
-        let health: Health = adapter.json(Method::GET, &["global", "health"], &[], None)?;
+        let health: Health = adapter.json(
+            "check server health",
+            Method::GET,
+            &["global", "health"],
+            &[],
+            None,
+        )?;
         if !health.healthy {
             return Err(Error::InvalidResponse("OpenCode server reported unhealthy"));
         }
-        if health.version != VERSION {
-            return Err(Error::UnsupportedVersion(health.version));
-        }
-        let paths: NativePaths = adapter.json(Method::GET, &["path"], &[], None)?;
+        let paths: NativePaths = adapter.json(
+            "attest the route's profile",
+            Method::GET,
+            &["path"],
+            &[],
+            None,
+        )?;
         if paths.directory != adapter.profile.owner().project()
             || paths.state != adapter.profile.state_home().join("opencode")
             || paths.config != adapter.profile.config_home().join("opencode")
         {
             return Err(Error::OwnerMismatch);
         }
+        // These reads must work before a turn can be safely tracked or approved.
+        // Session-specific operations verify their own replies when used.
+        adapter.session_statuses()?;
+        adapter.verify_authentication()?;
+        adapter.permission_requests()?;
         Ok(adapter)
     }
 
@@ -234,7 +254,13 @@ impl Adapter {
         if let Some(permission) = &permission {
             body["permission"] = permission.clone();
         }
-        let native: NativeSession = self.json(Method::POST, &["session"], &[], Some(body))?;
+        let native: NativeSession = self.json(
+            "create a session",
+            Method::POST,
+            &["session"],
+            &[],
+            Some(body),
+        )?;
         check_permissions(native.permission.as_ref(), permission.as_ref())?;
         self.session(native)
     }
@@ -252,7 +278,13 @@ impl Adapter {
     ) -> Result<Session> {
         self.check_owner(owner)?;
         check_id(native_id, "ses_")?;
-        let native: NativeSession = self.json(Method::GET, &["session", native_id], &[], None)?;
+        let native: NativeSession = self.json(
+            "reopen the session",
+            Method::GET,
+            &["session", native_id],
+            &[],
+            None,
+        )?;
         if native.id != native_id {
             return Err(Error::InvalidResponse(
                 "OpenCode returned a different session",
@@ -272,6 +304,7 @@ impl Adapter {
         let id = self.mutable_session(owner, session)?;
         check_id(message_id, "msg_")?;
         self.request(
+            "send a prompt",
             Method::POST,
             &["session", id, "prompt_async"],
             &[],
@@ -280,8 +313,7 @@ impl Adapter {
                 "model": { "providerID": "ox", "modelID": self.profile.owner().billing_alias() },
                 "parts": [{ "type": "text", "text": text }]
             })),
-            StatusCode::NO_CONTENT,
-            IO_TIMEOUT,
+            (StatusCode::NO_CONTENT, IO_TIMEOUT),
         )?;
         Ok(())
     }
@@ -304,13 +336,14 @@ impl Adapter {
         if let Some(before) = before {
             query.push(("before", before));
         }
+        let operation = "read session history";
         let response = self.request(
+            operation,
             Method::GET,
             &["session", id, "message"],
             &query,
             None,
-            StatusCode::OK,
-            IO_TIMEOUT,
+            (StatusCode::OK, IO_TIMEOUT),
         )?;
         let before = response
             .headers()
@@ -322,7 +355,7 @@ impl Adapter {
                     .map_err(|_| Error::InvalidResponse("Invalid OpenCode history cursor"))
             })
             .transpose()?;
-        let entries: Vec<HistoryEntry> = read_json(response)?;
+        let entries: Vec<HistoryEntry> = read_json(response, operation)?;
         if entries.len() > limit
             || entries.iter().any(|entry| {
                 !entry.info["id"]
@@ -353,12 +386,12 @@ impl Adapter {
 
     fn open_events(&self, session: Option<String>) -> Result<Events> {
         let response = self.request(
+            "open the native event stream",
             Method::GET,
             &["event"],
             &[],
             None,
-            StatusCode::OK,
-            EVENT_TIMEOUT,
+            (StatusCode::OK, EVENT_TIMEOUT),
         )?;
         Events::new(response, session)
     }
@@ -370,11 +403,20 @@ impl Adapter {
 
     pub fn is_idle(&self, owner: &Owner, session: &Session) -> Result<bool> {
         let id = self.check_session(owner, session)?;
-        let statuses: HashMap<String, Value> =
-            self.json(Method::GET, &["session", "status"], &[], None)?;
-        Ok(statuses
+        Ok(self
+            .session_statuses()?
             .get(id)
-            .is_none_or(|status| status["type"] == "idle"))
+            .is_none_or(|status| status.kind == "idle"))
+    }
+
+    fn session_statuses(&self) -> Result<HashMap<String, NativeStatus>> {
+        self.json(
+            "read session status",
+            Method::GET,
+            &["session", "status"],
+            &[],
+            None,
+        )
     }
 
     pub fn answer(
@@ -390,7 +432,10 @@ impl Adapter {
             return Err(Error::UnknownPermission);
         }
         match self.reply(request_id, decision) {
-            Err(Error::NativeStatus(StatusCode::NOT_FOUND)) => Err(Error::UnknownPermission),
+            Err(Error::NativeStatus {
+                status: StatusCode::NOT_FOUND,
+                ..
+            }) => Err(Error::UnknownPermission),
             result => result,
         }
     }
@@ -401,6 +446,7 @@ impl Adapter {
         let id = self.check_session(owner, session)?.to_owned();
         self.fenced.insert(id.clone());
         let aborted: bool = self.json(
+            "abort the turn",
             Method::POST,
             &["session", &id, "abort"],
             &[],
@@ -423,7 +469,13 @@ impl Adapter {
                 return Err(Error::BlockedByCancellation);
             }
             if let Err(error) = self.reply(&ask.id, Decision::Reject)
-                && !matches!(error, Error::NativeStatus(StatusCode::NOT_FOUND))
+                && !matches!(
+                    error,
+                    Error::NativeStatus {
+                        status: StatusCode::NOT_FOUND,
+                        ..
+                    }
+                )
             {
                 return Err(error);
             }
@@ -471,9 +523,8 @@ impl Adapter {
     }
 
     fn pending_in(&self, session_id: &str) -> Result<Vec<PermissionRequest>> {
-        let requests: Vec<PermissionRequest> =
-            self.json(Method::GET, &["permission"], &[], None)?;
-        let scoped: Vec<_> = requests
+        let scoped: Vec<_> = self
+            .permission_requests()?
             .into_iter()
             .filter(|ask| ask.session_id == session_id)
             .collect();
@@ -483,12 +534,23 @@ impl Adapter {
         Ok(scoped)
     }
 
+    fn permission_requests(&self) -> Result<Vec<PermissionRequest>> {
+        self.json(
+            "list pending permissions",
+            Method::GET,
+            &["permission"],
+            &[],
+            None,
+        )
+    }
+
     fn reply(&self, request: &str, decision: Decision) -> Result<()> {
         let reply = match decision {
             Decision::AllowOnce => "once",
             Decision::Reject => "reject",
         };
         let ok: bool = self.json(
+            "resolve a permission",
             Method::POST,
             &["permission", request, "reply"],
             &[],
@@ -505,24 +567,44 @@ impl Adapter {
 
     fn json<T: DeserializeOwned>(
         &self,
+        operation: &'static str,
         method: Method,
         path: &[&str],
         query: &[(&str, &str)],
         body: Option<Value>,
     ) -> Result<T> {
-        let response = self.request(method, path, query, body, StatusCode::OK, IO_TIMEOUT)?;
-        read_json(response)
+        let response = self.request(
+            operation,
+            method,
+            path,
+            query,
+            body,
+            (StatusCode::OK, IO_TIMEOUT),
+        )?;
+        read_json(response, operation)
     }
 
-    fn request(
+    fn verify_authentication(&self) -> Result<()> {
+        let response = self
+            .request_builder(Method::GET, &["session", "status"], &[])?
+            .send()?;
+        if !matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) {
+            return Err(Error::InvalidResponse(
+                "Installed OpenCode did not require authentication for session status",
+            ));
+        }
+        Ok(())
+    }
+
+    fn request_builder(
         &self,
         method: Method,
         path: &[&str],
         query: &[(&str, &str)],
-        body: Option<Value>,
-        status: StatusCode,
-        timeout: Duration,
-    ) -> Result<Response> {
+    ) -> Result<RequestBuilder> {
         let mut url = self.origin.clone();
         url.path_segments_mut()
             .map_err(|_| Error::InvalidInput("Invalid OpenCode endpoint"))?
@@ -531,9 +613,20 @@ impl Adapter {
         url.query_pairs_mut()
             .append_pair("directory", self.profile.owner().directory())
             .extend_pairs(query.iter().copied());
+        Ok(self.client.request(method, url))
+    }
+
+    fn request(
+        &self,
+        operation: &'static str,
+        method: Method,
+        path: &[&str],
+        query: &[(&str, &str)],
+        body: Option<Value>,
+        (status, timeout): (StatusCode, Duration),
+    ) -> Result<Response> {
         let mut request = self
-            .client
-            .request(method, url)
+            .request_builder(method, path, query)?
             .basic_auth("opencode", Some(&self.password))
             .timeout(timeout);
         if let Some(body) = body {
@@ -541,7 +634,10 @@ impl Adapter {
         }
         let response = request.send()?;
         if response.status() != status {
-            return Err(Error::NativeStatus(response.status()));
+            return Err(Error::NativeStatus {
+                operation,
+                status: response.status(),
+            });
         }
         Ok(response)
     }
@@ -550,7 +646,12 @@ impl Adapter {
 #[derive(Deserialize)]
 struct Health {
     healthy: bool,
-    version: String,
+}
+
+#[derive(Deserialize)]
+struct NativeStatus {
+    #[serde(rename = "type")]
+    kind: String,
 }
 
 #[derive(Deserialize)]
@@ -560,7 +661,7 @@ struct NativePaths {
     config: PathBuf,
 }
 
-fn read_json<T: DeserializeOwned>(response: Response) -> Result<T> {
+fn read_json<T: DeserializeOwned>(response: Response, operation: &'static str) -> Result<T> {
     let mut body = Vec::new();
     response
         .take((MAX_WIRE_BYTES + 1) as u64)
@@ -570,7 +671,7 @@ fn read_json<T: DeserializeOwned>(response: Response) -> Result<T> {
             "OpenCode JSON response exceeds the host transport limit",
         ));
     }
-    Ok(serde_json::from_slice(&body)?)
+    serde_json::from_slice(&body).map_err(|_| Error::IncompatibleReply(operation))
 }
 
 fn check_id(id: &str, prefix: &str) -> Result<()> {
