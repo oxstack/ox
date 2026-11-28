@@ -632,11 +632,20 @@ pub(super) fn composer_input(
     let mut chips = row().gap_1().flex_wrap();
     for (i, img) in store.draft_images(owner.as_deref()).iter().enumerate() {
         let target = owner.clone();
+        let name = match img {
+            ImageInput::File(_) => img.label(),
+            ImageInput::Clipboard(mime, _) => {
+                format!(
+                    "{} image",
+                    mime.trim_start_matches("image/").to_ascii_uppercase()
+                )
+            }
+        };
         let size_label = image_size_label(img);
-        let label = if size_label.is_empty() {
-            format!("{}   ×", img.label())
+        let probe_label = if size_label.is_empty() {
+            format!("{name}   ×")
         } else {
-            format!("{} ({size_label})   ×", img.label())
+            format!("{name} ({size_label})   ×")
         };
         let thumb: AnyElement = match img {
             ImageInput::File(path) => gpui::img(path.clone())
@@ -647,7 +656,7 @@ pub(super) fn composer_input(
             ImageInput::Clipboard(..) => image_thumb_icon(p).into_any_element(),
         };
         let id = ElementId::from(("attached-image", i));
-        let probe_label = SharedString::from(label.clone());
+        let probe_label = SharedString::from(probe_label);
         let chip = gpui_component::button::Button::new(id.clone())
             .ghost()
             .h(px(26.))
@@ -668,7 +677,7 @@ pub(super) fn composer_input(
                         div()
                             .text_size(p.text(Step::Meta))
                             .text_color(rgb(p.fg))
-                            .child(img.label()),
+                            .child(name),
                     )
                     .when(!size_label.is_empty(), |r| {
                         r.child(

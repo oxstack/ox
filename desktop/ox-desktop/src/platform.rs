@@ -1,4 +1,5 @@
 pub(crate) mod attachments;
+pub(crate) mod browser;
 mod host_client;
 pub(crate) mod hosts;
 #[cfg(test)]
