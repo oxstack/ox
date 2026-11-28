@@ -146,13 +146,13 @@ impl Workbench {
                         true,
                         true,
                         cx.listener(move |s, _, _, cx| {
-                            s.awaiting_login = true;
-                            s.launch_error = crate::terminal::open_remote(
-                                host.clone(),
-                                ox_host_web::terminal_protocol::OpenTerminal::login(runtime),
-                                cx,
-                            )
-                            .err();
+                            if let Some(preset) =
+                                ox_host_web::terminal_protocol::OpenTerminal::login(runtime)
+                            {
+                                s.awaiting_login = true;
+                                s.launch_error =
+                                    crate::terminal::open_remote(host.clone(), preset, cx).err();
+                            }
                             cx.notify()
                         }),
                     ))

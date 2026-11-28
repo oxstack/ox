@@ -21,6 +21,7 @@ use std::{
 
 pub mod antigravity;
 pub mod claude;
+pub mod opencode;
 mod projection;
 pub mod replica;
 mod titles;
@@ -328,6 +329,11 @@ impl Store {
             return;
         }
         if self.profile != previous.profile {
+            return;
+        }
+        if self.is_opencode() {
+            self.drafts = std::mem::take(&mut previous.drafts);
+            self.selected.clone_from(&previous.selected);
             return;
         }
         self.child_threads = std::mem::take(&mut previous.child_threads);
@@ -684,6 +690,7 @@ impl Store {
             }
             LinkEvent::Antigravity(event) => return self.antigravity_event(event),
             LinkEvent::Claude(update) => return self.claude_event(update),
+            LinkEvent::OpenCode(event) => return self.opencode_event(event),
             LinkEvent::SignInRequired => {
                 self.state = Connection::SignInRequired;
                 self.changed.mark(Changed::CONNECTION);

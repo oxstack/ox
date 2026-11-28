@@ -134,6 +134,13 @@ impl Store {
     }
     fn scope_caps(&self) -> Vec<String> {
         let mut caps = Vec::new();
+        if self.is_opencode() {
+            return if self.can_send(None) {
+                vec!["start".into()]
+            } else {
+                caps
+            };
+        }
         if self.can_send(None) {
             caps.extend(["start".into(), "access".into()]);
             self.composer_caps(None, &mut caps);
@@ -176,6 +183,9 @@ impl Store {
             .collect()
     }
     fn session_view(&self, r: &ThreadRow) -> SessionView {
+        if self.is_opencode() {
+            return self.opencode_session_view(r);
+        }
         let id = r.id.as_str();
         let t = self.transcript(id);
         let running = t.is_some_and(|t| t.active_turn().is_some());

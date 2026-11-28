@@ -16,7 +16,11 @@ impl std::ops::Deref for Active {
 }
 /// "Same as terminal" plus every native preset of `runtime`, as start-mode choices.
 fn start_choices(runtime: Runtime, b: Behavior) -> Vec<(&'static str, Behavior)> {
+    if runtime == Runtime::OpenCode {
+        return Vec::new();
+    }
     let with = |start: Option<Access>| match runtime {
+        Runtime::OpenCode => b,
         Runtime::Claude => Behavior {
             claude_start: start,
             ..b

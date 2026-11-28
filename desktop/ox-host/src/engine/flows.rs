@@ -444,6 +444,9 @@ impl Engine {
 
     /// Why a session cannot be handed off right now, naming what is pending.
     fn handoff_blocker(&self, scope: &Scope, source: &str) -> Option<String> {
+        if scope.route.runtime == ox_desk_core::runtime::Runtime::OpenCode {
+            return Some("Hosted OpenCode does not support session handoff.".into());
+        }
         let live = self.running.get(scope)?;
         if live.store.catalog_row(source).is_none() || live.store.transcript(source).is_none() {
             return Some("Open the session before handing it off.".into());
@@ -830,6 +833,9 @@ impl Engine {
                 handoff::context_turn(&source, &selection, &start.request, false),
                 vec![],
             ),
+            ox_desk_core::runtime::Runtime::OpenCode => {
+                fail!("Hosted OpenCode does not support session handoff.".into())
+            }
         };
         let origin = Origin {
             linked: None,

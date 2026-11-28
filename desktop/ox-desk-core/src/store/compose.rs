@@ -266,7 +266,8 @@ impl Store {
     }
     /// Includes the interval between accepting a send and receiving turn/started.
     pub fn has_pending_turn(&self) -> bool {
-        self.antigravity_opening()
+        self.opencode_pending_turn()
+            || self.antigravity_opening()
             || !self.resume_sends.is_empty()
             || self.drafts.values().any(|d| d.sent.is_some())
             || self
@@ -276,6 +277,9 @@ impl Store {
     }
 
     pub fn sending(&self, id: Option<&str>) -> bool {
+        if self.is_opencode() {
+            return self.opencode_sending(id);
+        }
         if let Some(remote) = self.remote() {
             return remote.sending.contains(id.unwrap_or("")) || self.pending_input(id);
         }
@@ -286,6 +290,9 @@ impl Store {
                 .is_some_and(|d| d.sent.is_some())
     }
     pub fn can_send(&self, id: Option<&str>) -> bool {
+        if self.is_opencode() {
+            return self.opencode_can_send(id);
+        }
         if let Some(remote) = self.remote() {
             return match id {
                 None => remote.scope_caps.iter().any(|s| s == "start"),
@@ -782,7 +789,7 @@ impl Store {
     /// Threads with a live process or subscription in this local store. A
     /// Claude process is one session; the blank draft process is not listed.
     pub fn live_threads(&self) -> Vec<String> {
-        if self.remote().is_some() {
+        if self.is_opencode() || self.remote().is_some() {
             return vec![];
         }
         if self.is_antigravity() {
@@ -884,7 +891,7 @@ impl Store {
     }
     /// This thread has a live process or subscription to end.
     pub fn has_live_session(&self, id: &str) -> bool {
-        if self.remote().is_some() {
+        if self.is_opencode() || self.remote().is_some() {
             return false;
         }
         if self.is_antigravity() {

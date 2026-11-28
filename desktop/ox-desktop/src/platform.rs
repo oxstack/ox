@@ -86,6 +86,7 @@ pub fn launch_login(runtime: ox_desk_core::runtime::Runtime, project: &Path) -> 
     match runtime {
         Runtime::Codex => launch_chatgpt_login(project),
         Runtime::Claude => launch_claude_login(project),
+        Runtime::OpenCode => Err("Hosted OpenCode uses an OX API route.".into()),
         Runtime::Antigravity => {
             let path = child_path();
             let program = find(runtime.executable(), &path)

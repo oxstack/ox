@@ -44,7 +44,10 @@ impl Replay {
                 .iter()
                 .filter(move |(i, s, _)| {
                     *i > seq
-                        && scope.is_none_or(|scope| scope == s)
+                        && match scope {
+                            Some(wanted) => wanted == s,
+                            None => s.route.runtime != ox_desk_core::runtime::Runtime::OpenCode,
+                        }
                         && supports_route(version, &s.route)
                 })
                 .map(|(_, _, p)| p.clone()),

@@ -8,6 +8,7 @@ pub mod codex;
 
 pub enum Link {
     Antigravity(Box<crate::store::antigravity::Project>),
+    OpenCode(Box<crate::store::opencode::Project>),
     Host(Box<crate::store::replica::Remote>),
     Codex(codex::Link),
     Claude(Box<crate::store::claude::Project>),
@@ -21,16 +22,18 @@ impl Link {
     pub(crate) fn codex(&self) -> io::Result<&codex::Link> {
         match self {
             Self::Codex(link) => Ok(link),
-            Self::Antigravity(_) | Self::Claude(_) | Self::Host(_) => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "This operation requires a Codex session",
-            )),
+            Self::Antigravity(_) | Self::Claude(_) | Self::Host(_) | Self::OpenCode(_) => {
+                Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "This operation requires a Codex session",
+                ))
+            }
         }
     }
     pub(crate) fn forget(&self, seq: i64) {
         match self {
             Self::Codex(link) => link.forget(seq),
-            Self::Antigravity(_) | Self::Claude(_) | Self::Host(_) => (),
+            Self::Antigravity(_) | Self::Claude(_) | Self::Host(_) | Self::OpenCode(_) => (),
         }
     }
 }
@@ -45,6 +48,7 @@ pub enum LinkEvent {
     SignInRequired,
     Frame(Frame),
     Antigravity(crate::store::antigravity::Event),
+    OpenCode(crate::store::opencode::Event),
     Claude(crate::store::claude::Update),
     Closed {
         reason: String,

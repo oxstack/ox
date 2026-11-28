@@ -436,6 +436,7 @@ impl Discovery {
                 Runtime::Codex => "Live in Codex",
                 Runtime::Claude => "Live in Claude Code",
                 Runtime::Antigravity => "Live in Antigravity",
+                Runtime::OpenCode => "Live in OpenCode",
             }),
             _ => None,
         };

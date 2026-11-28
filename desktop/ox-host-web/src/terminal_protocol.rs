@@ -17,12 +17,13 @@ pub enum OpenTerminal {
 }
 
 impl OpenTerminal {
-    pub fn login(runtime: ox_desk_core::runtime::Runtime) -> Self {
+    pub fn login(runtime: ox_desk_core::runtime::Runtime) -> Option<Self> {
         use ox_desk_core::runtime::Runtime;
         match runtime {
-            Runtime::Codex => Self::CodexLogin,
-            Runtime::Claude => Self::ClaudeLogin,
-            Runtime::Antigravity => Self::AntigravityLogin,
+            Runtime::Codex => Some(Self::CodexLogin),
+            Runtime::Claude => Some(Self::ClaudeLogin),
+            Runtime::Antigravity => Some(Self::AntigravityLogin),
+            Runtime::OpenCode => None,
         }
     }
 }

@@ -158,6 +158,7 @@ impl RuntimeConfig {
                     || match r.runtime {
                         Runtime::Codex => s.chatgpt_account.is_some(),
                         Runtime::Claude => s.claude_account,
+                        Runtime::OpenCode => false,
                         Runtime::Antigravity => {
                             ox_desk_core::links::antigravity::executable(&self.path).is_some()
                         }
@@ -312,6 +313,11 @@ impl RuntimeConfig {
                     },
                     move |e| deliver(e),
                 )
+            }
+            Runtime::OpenCode => {
+                return Err(io::Error::other(
+                    "Hosted OpenCode requires an explicitly enrolled local route",
+                ));
             }
             Runtime::Antigravity => {
                 use ox_desk_core::{links::antigravity, store::antigravity::PROVIDER};

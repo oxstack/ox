@@ -120,6 +120,11 @@ impl Engine {
             Ok(scope) => scope,
             Err(err) => reject!(err),
         };
+        if scope.route.runtime == ox_desk_core::runtime::Runtime::OpenCode
+            || packet.source.runtime == ox_desk_core::runtime::Runtime::OpenCode
+        {
+            reject!("Hosted OpenCode does not support session handoff.");
+        }
         if packet.target_host != self.host_id.to_string()
             || packet
                 .source

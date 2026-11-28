@@ -15,17 +15,17 @@ pub struct Event {
     pub properties: Value,
 }
 
-/// Each stream is scoped to one session. The native server is volatile and
+/// A stream can observe one session or its whole owner route. The native server is volatile and
 /// does not replay missed events, so no upstream cursor is sent.
 pub struct Events {
     input: Response,
-    session: String,
+    session: Option<String>,
     framer: SseFramer,
     queued: VecDeque<SseEvent>,
 }
 
 impl Events {
-    pub(super) fn new(response: Response, session: String) -> Result<Self> {
+    pub(super) fn new(response: Response, session: Option<String>) -> Result<Self> {
         if response
             .headers()
             .get(CONTENT_TYPE)
@@ -52,7 +52,10 @@ impl Events {
         loop {
             if let Some(raw) = self.queued.pop_front() {
                 let event: Event = serde_json::from_str(&raw.data)?;
-                if event.properties["sessionID"] == self.session
+                if self
+                    .session
+                    .as_ref()
+                    .is_none_or(|id| event.properties["sessionID"] == *id)
                     || matches!(
                         event.name.as_str(),
                         "server.connected" | "server.heartbeat" | "server.instance.disposed"

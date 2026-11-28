@@ -53,7 +53,7 @@ impl Store {
                 .unwrap_or(&self.profile.route)
                 .clone();
         }
-        if self.is_session_scoped() || self.is_antigravity() {
+        if self.is_session_scoped() || self.is_antigravity() || self.is_opencode() {
             return self.profile.route.clone();
         }
         let Billing::Api(alias) = &self.profile.route.billing else {
@@ -72,6 +72,14 @@ impl Store {
                 .or(self.next_options.as_ref())
                 .cloned()
                 .unwrap_or_default();
+        }
+        if self.is_opencode()
+            && let Billing::Api(alias) = &self.profile.route.billing
+        {
+            return Options {
+                model: alias.clone(),
+                ..Options::default()
+            };
         }
         let mut caps = self.command_caps(thread);
         if caps.model.is_empty()
@@ -102,6 +110,11 @@ impl Store {
     pub fn same_model_route(&self, model: &str) -> bool {
         match &self.profile.route.billing {
             Billing::Subscription => true,
+            Billing::Api(active)
+                if self.profile.route.runtime == crate::runtime::Runtime::OpenCode =>
+            {
+                active == model
+            }
             Billing::Api(active)
                 if self.is_session_scoped() || self.profile.provider == "codeox" =>
             {

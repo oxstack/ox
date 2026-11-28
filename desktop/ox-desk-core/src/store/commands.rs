@@ -191,7 +191,10 @@ impl Store {
     /// An unknown command on a cold Claude route can be an installed project skill.
     /// Only its submission asks the runtime which commands this session supports.
     pub fn parse_command(&self, id: Option<&str>, text: &str) -> Option<crate::slash::Action> {
-        if self.profile.route.runtime == crate::runtime::Runtime::Antigravity {
+        if matches!(
+            self.profile.route.runtime,
+            crate::runtime::Runtime::Antigravity | crate::runtime::Runtime::OpenCode
+        ) {
             return None;
         }
         let caps = self.command_caps(id);
@@ -377,6 +380,11 @@ pub struct Handoff {
 
 impl Store {
     pub fn handoff_argv(&self, thread: Option<&str>) -> io::Result<Vec<String>> {
+        if self.profile.route.runtime == crate::runtime::Runtime::OpenCode {
+            return Err(io::Error::other(
+                "Hosted OpenCode sessions stay on their owning host",
+            ));
+        }
         if self.profile.route.runtime == crate::runtime::Runtime::Antigravity {
             return Err(io::Error::other(
                 "This Antigravity session runs through ACP.",

@@ -72,6 +72,7 @@ impl Level {
             (Runtime::Antigravity, Self::Read) => Access::Plan,
             (Runtime::Antigravity, Self::Yolo) => Access::Yolo,
             (Runtime::Antigravity, _) => Access::AcceptEdits,
+            (Runtime::OpenCode, _) => Access::Configured,
         }
     }
     /// Whether a native preset stays within this level. Unverified presets never do.

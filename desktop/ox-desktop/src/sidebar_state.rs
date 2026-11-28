@@ -49,6 +49,7 @@ impl ThreadMetaKey {
             Runtime::Codex => "codex",
             Runtime::Claude => "claude",
             Runtime::Antigravity => "antigravity",
+            Runtime::OpenCode => "opencode",
         };
         serde_json::to_string(&(&self.project, runtime, &self.id)).unwrap_or_default()
     }
@@ -59,6 +60,7 @@ impl ThreadMetaKey {
             "codex" => Runtime::Codex,
             "claude" => Runtime::Claude,
             "antigravity" => Runtime::Antigravity,
+            "opencode" => Runtime::OpenCode,
             _ => return None,
         };
         Some(Self {
@@ -135,6 +137,7 @@ impl ThreadMeta {
                     Runtime::Codex => "openai".into(),
                     Runtime::Claude => "anthropic".into(),
                     Runtime::Antigravity => "antigravity".into(),
+                    Runtime::OpenCode => "opencode".into(),
                 }),
             cwd: key.project.clone(),
             model: self.cached_model.clone(),

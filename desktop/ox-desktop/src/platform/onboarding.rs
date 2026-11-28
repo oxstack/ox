@@ -115,7 +115,7 @@ fn signed_in(runtime: ox_desk_core::runtime::Runtime) -> bool {
                 })
         }
         // The Antigravity ACP process reports sign-in state through its public protocol.
-        Runtime::Antigravity => false,
+        Runtime::Antigravity | Runtime::OpenCode => false,
     }
 }
 /// Choose a first route from the installed clients and locally saved sign-in state.

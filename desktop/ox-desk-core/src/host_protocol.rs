@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::{collections::BTreeMap, path::PathBuf};
 
 pub const IDLE_UPDATE: &str = "idle_update";
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 pub const MIN_VERSION: u32 = 1;
 const ANTIGRAVITY_VERSION: u32 = 2;
 
@@ -24,7 +24,12 @@ pub fn supported(selected: u32) -> bool {
 }
 
 pub fn supports_runtime(version: u32, runtime: crate::runtime::Runtime) -> bool {
-    runtime != crate::runtime::Runtime::Antigravity || version >= ANTIGRAVITY_VERSION
+    use crate::runtime::Runtime;
+    match runtime {
+        Runtime::Antigravity => version >= ANTIGRAVITY_VERSION,
+        Runtime::OpenCode => version >= 3,
+        Runtime::Codex | Runtime::Claude => true,
+    }
 }
 
 pub fn supports_route(version: u32, route: &Route) -> bool {

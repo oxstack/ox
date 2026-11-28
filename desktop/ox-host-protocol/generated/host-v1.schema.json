@@ -2526,7 +2526,8 @@
       "enum": [
         "codex",
         "claude",
-        "antigravity"
+        "antigravity",
+        "opencode"
       ],
       "type": "string"
     },

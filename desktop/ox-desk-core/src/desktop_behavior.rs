@@ -110,6 +110,7 @@ pub fn start_mode(runtime: Runtime) -> Option<Access> {
         Runtime::Claude => behavior.claude_start,
         Runtime::Codex => behavior.codex_start,
         Runtime::Antigravity => behavior.antigravity_start,
+        Runtime::OpenCode => None,
     }?;
     Access::choices(runtime).contains(&chosen).then_some(chosen)
 }

@@ -26,6 +26,7 @@ mod managed_install;
 mod memory_cli;
 mod native;
 mod opencode;
+mod opencode_host_protocol;
 mod picker;
 mod provider;
 mod ps;
@@ -212,6 +213,9 @@ async fn launch(args: impl Iterator<Item = OsString>) -> Result<u8, RelayError> 
         Some("setup") => return run_setup(&args[1..], &codex_home).await,
         Some("serve") => return daemon::run(&args[1..], &codex_home).await,
         Some("opencode") => return opencode::run(&args[1..], &codex_home).await,
+        Some(opencode_host_protocol::COMMAND) if args.len() == 1 => {
+            return opencode::hosted::run(&codex_home).await;
+        }
         Some("doctor") if args.iter().any(|arg| arg == "--live") => {
             return diagnostics::run(&args[1..], &codex_home).await;
         }

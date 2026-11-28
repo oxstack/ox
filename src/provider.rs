@@ -1772,6 +1772,13 @@ pub struct Routes {
 }
 
 impl Routes {
+    /// An OX-owned process uses the exact model on its billing route.
+    pub(crate) fn retain_exact(&mut self, alias: &str) {
+        self.by_alias.retain(|key, _| key == alias);
+        self.by_upstream.clear();
+        self.prefix_vendors.clear();
+    }
+
     pub fn build(vendors: &[Vendor], models: &[Vec<ModelSpec>]) -> Result<Self, RelayError> {
         let mut by_alias: BTreeMap<String, Route> = BTreeMap::new();
         let mut by_upstream: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -2680,6 +2687,24 @@ env_key = "BETA_KEY"
             routes.resolve("unknown-model"),
             Resolution::Unknown
         ));
+    }
+
+    #[test]
+    fn hosted_route_keeps_only_the_exact_alias() {
+        let config = two_vendors("", "");
+        let mut models = vec![Vec::new(); config.vendors.len()];
+        models[0].push(spec("local"));
+        models[1].push(spec("alternate"));
+        let mut routes = Routes::build(&config.vendors, &models).unwrap();
+        routes.retain_exact("alpha/local");
+        assert_eq!(routes.aliases().collect::<Vec<_>>(), ["alpha/local"]);
+        assert!(matches!(
+            routes.resolve("alpha/local"),
+            Resolution::Route(_)
+        ));
+        for other in ["local", "alpha/unlisted", "beta/alternate"] {
+            assert!(matches!(routes.resolve(other), Resolution::Unknown));
+        }
     }
 
     #[test]

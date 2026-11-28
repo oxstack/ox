@@ -2,8 +2,10 @@
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
+use std::io::Write as _;
 use std::net::Ipv4Addr;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::sync::Arc;
@@ -20,8 +22,17 @@ use crate::{App, Catalog, MAX_REQUEST_BYTES, clients, random_token, serve, upstr
 
 const MESSAGES_SDK: &str = "@ai-sdk/anthropic";
 const KEY_REFERENCE: &str = "{env:CODEOX_TOKEN}";
+const RELAY_TOKEN_FILE: &str = ".ox-relay-token";
 
-pub(crate) async fn run(args: &[OsString], home: &Path) -> Result<u8, RelayError> {
+pub(crate) mod hosted;
+
+struct Gateway {
+    relay: App,
+    env_refs: BTreeSet<String>,
+    token: String,
+}
+
+async fn load(home: &Path) -> Result<Gateway, RelayError> {
     let config_path = CodeoxConfig::path(home);
     if !config_path.try_exists()? {
         return Err("no ox API provider configured for OpenCode\n  fix: ox setup".into());
@@ -45,6 +56,19 @@ pub(crate) async fn run(args: &[OsString], home: &Path) -> Result<u8, RelayError
     // OpenCode uses the Messages wire. Shared catalog discovery avoids the
     // stock Codex and Claude harness filters.
     relay.client_kind = clients::ClientKind::Claude;
+    Ok(Gateway {
+        relay,
+        env_refs,
+        token,
+    })
+}
+
+pub(crate) async fn run(args: &[OsString], home: &Path) -> Result<u8, RelayError> {
+    let Gateway {
+        relay,
+        env_refs,
+        token,
+    } = load(home).await?;
     let available: BTreeSet<_> = relay
         .launch_models()
         .into_iter()
@@ -64,7 +88,6 @@ pub(crate) async fn run(args: &[OsString], home: &Path) -> Result<u8, RelayError
     if let Some(alias) = clients::explicit_model(args).and_then(|model| model.strip_prefix("ox/")) {
         relay.prewarm(alias);
     }
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
     let favorites = crate::picker::read_favorites(home).unwrap_or_default();
     let default_model = favorites
         .iter()
@@ -72,43 +95,10 @@ pub(crate) async fn run(args: &[OsString], home: &Path) -> Result<u8, RelayError
         .find(|alias| available.contains(alias))
         .or_else(|| available.first().copied())
         .expect("available aliases were checked above");
-    let models = models(&relay, &available);
-    let config = json!({
-        "enabled_providers": ["ox"],
-        "disabled_providers": [],
-        "model": format!("ox/{default_model}"),
-        "provider": {
-            "ox": {
-                "id": "ox",
-                "name": "OX API",
-                "npm": MESSAGES_SDK,
-                "env": [TOKEN_ENV],
-                "whitelist": available,
-                "blacklist": [],
-                "options": {
-                    "baseURL": format!("http://{}/v1", listener.local_addr()?),
-                    "apiKey": KEY_REFERENCE,
-                },
-                "models": models,
-            }
-        },
-    });
     let profile = clients::opencode_profile(home)?;
-    // The stock config directory is merged after the project config. It keeps
-    // the managed API route authoritative without disabling project settings.
-    // Put large model catalogs on disk rather than in a single env variable.
-    let launch_config = tempfile::Builder::new()
-        .prefix(".ox-open-")
-        .tempdir_in(profile.join("config"))?;
-    serde_json::to_writer(
-        File::create(launch_config.path().join("opencode.json"))?,
-        &config,
-    )?;
-    let mut command = command(args, &profile, env_refs);
-    command
-        .env(TOKEN_ENV, token)
-        .env("OPENCODE_CONFIG_DIR", launch_config.path())
-        .env("OPENCODE_DISABLE_MODELS_FETCH", "1");
+    let (listener, launch_config) =
+        launch_config(&profile, &relay, &available, default_model, None).await?;
+    let mut command = command(args, &profile, env_refs, Some(token), &launch_config);
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut child = command
@@ -143,7 +133,67 @@ pub(crate) async fn run(args: &[OsString], home: &Path) -> Result<u8, RelayError
     }
 }
 
-fn command(args: &[OsString], profile: &Path, env_refs: BTreeSet<String>) -> Command {
+async fn launch_config(
+    profile: &Path,
+    relay: &App,
+    available: &BTreeSet<&str>,
+    default_model: &str,
+    private_file_token: Option<&str>,
+) -> Result<(TcpListener, tempfile::TempDir), RelayError> {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+    let launch_config = tempfile::Builder::new()
+        .prefix(".ox-open-")
+        .tempdir_in(profile.join("config"))?;
+    let file_reference = format!("{{file:{RELAY_TOKEN_FILE}}}");
+    let (key_reference, key_env) = if let Some(token) = private_file_token {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(launch_config.path().join(RELAY_TOKEN_FILE))?
+            .write_all(token.as_bytes())?;
+        (file_reference.as_str(), &[][..])
+    } else {
+        (KEY_REFERENCE, &[TOKEN_ENV][..])
+    };
+    let models = models(relay, available, key_reference);
+    let config = json!({
+        "enabled_providers": ["ox"],
+        "disabled_providers": [],
+        "model": format!("ox/{default_model}"),
+        "provider": {
+            "ox": {
+                "id": "ox",
+                "name": "OX API",
+                "npm": MESSAGES_SDK,
+                "env": key_env,
+                "whitelist": available,
+                "blacklist": [],
+                "options": {
+                    "baseURL": format!("http://{}/v1", listener.local_addr()?),
+                    "apiKey": key_reference,
+                },
+                "models": models,
+            }
+        },
+    });
+    // The stock config directory is merged after the project config. It keeps
+    // the managed API route authoritative without disabling project settings.
+    // Put large model catalogs on disk rather than in a single env variable.
+    serde_json::to_writer(
+        File::create(launch_config.path().join("opencode.json"))?,
+        &config,
+    )?;
+    Ok((listener, launch_config))
+}
+
+fn command(
+    args: &[OsString],
+    profile: &Path,
+    env_refs: BTreeSet<String>,
+    token: Option<String>,
+    launch_config: &tempfile::TempDir,
+) -> Command {
     let mut command = Command::new("opencode");
     crate::exempt_loopback_proxy(&mut command);
     for name in env_refs {
@@ -156,15 +206,21 @@ fn command(args: &[OsString], profile: &Path, env_refs: BTreeSet<String>) -> Com
         .env("XDG_CONFIG_HOME", profile.join("config"))
         .env("XDG_DATA_HOME", profile.join("data"))
         .env("XDG_STATE_HOME", profile.join("state"))
+        .env_remove(TOKEN_ENV)
+        .env("OPENCODE_CONFIG_DIR", launch_config.path())
+        .env("OPENCODE_DISABLE_MODELS_FETCH", "1")
         .env_remove("OPENCODE_DB")
         .env_remove("OPENCODE_CONFIG")
         .env_remove("OPENCODE_CONFIG_CONTENT")
         .env_remove(crate::daemon::KEY_ENV);
+    if let Some(token) = token {
+        command.env(TOKEN_ENV, token);
+    }
     crate::host_lifetime::isolate_stock(&mut command);
     command
 }
 
-fn models(relay: &App, available: &BTreeSet<&str>) -> Map<String, Value> {
+fn models(relay: &App, available: &BTreeSet<&str>, key_reference: &str) -> Map<String, Value> {
     relay
         .visible_models()
         .filter_map(|entry| {
@@ -189,7 +245,7 @@ fn models(relay: &App, available: &BTreeSet<&str>) -> Map<String, Value> {
                         entry["description"].as_str()?,
                     ),
                     "provider": {"npm": MESSAGES_SDK},
-                    "headers": {"x-api-key": KEY_REFERENCE},
+                    "headers": {"x-api-key": key_reference},
                     // OX's catalog excludes discovered models that declare
                     // no tool support. Static models inherit OX's tool policy.
                     "tool_call": true,

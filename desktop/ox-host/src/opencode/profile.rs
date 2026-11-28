@@ -48,7 +48,7 @@ impl Owner {
         &self.billing_alias
     }
 
-    fn profile_key(&self) -> String {
+    pub(super) fn profile_key(&self) -> String {
         let mut digest = Sha256::new();
         for field in [&self.host_id, &self.project, &self.billing_alias] {
             digest.update((field.len() as u64).to_be_bytes());

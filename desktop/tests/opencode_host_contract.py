@@ -1,6 +1,6 @@
 """Verify the stock OpenCode server contract used by a future OX hosted adapter.
 
-Run with a stock binary from the pinned release and a built OX gateway.
+Run with a stock binary and a built OX gateway.
 python3 desktop/tests/opencode_host_contract.py /path/to/opencode /path/to/ox
 """
 
@@ -23,9 +23,20 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 
-VERSION = "1.19.6"
 MODEL = "fixture/local"
 SHELL_CASES = {"deny": "deny.txt", "allow": "allow.txt", "cancel approval": "cancel.txt"}
+
+
+def report_version(binary):
+    with tempfile.TemporaryDirectory(prefix="ox-opencode-version-") as temp:
+        state = Path(temp)
+        env = {
+            "PATH": os.environ["PATH"], "HOME": temp,
+            **{f"XDG_{name}_HOME": str(state / name.lower())
+               for name in ("CONFIG", "DATA", "STATE", "CACHE")},
+        }
+        shown = subprocess.check_output([binary, "--version"], text=True, cwd=state, env=env)
+        print("Testing stock OpenCode", shown.strip(), flush=True)
 
 
 def wait(check, description):
@@ -55,6 +66,9 @@ class Provider(BaseHTTPRequestHandler):
             return
         last_user = next(row["content"] for row in reversed(payload["messages"]) if row["role"] == "user")
         case = " ".join(part.get("text", "") for part in last_user if part["type"] == "text")
+        self.respond(case)
+
+    def respond(self, case):
         filename = SHELL_CASES.get(case)
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -70,14 +84,15 @@ class Provider(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def stream(self, case, filename):
+        response_id = secrets.token_hex(8)
         self.write_event("message_start", message={
-            "id": "msg_fixture", "type": "message", "role": "assistant", "model": "local",
+            "id": f"msg_fixture_{response_id}", "type": "message", "role": "assistant", "model": "local",
             "content": [], "stop_reason": None, "stop_sequence": None,
             "usage": {"input_tokens": 12, "output_tokens": 0},
         })
         if filename:
             self.write_event("content_block_start", index=0, content_block={
-                "type": "tool_use", "id": "toolu_fixture", "name": "bash", "input": {},
+                "type": "tool_use", "id": f"toolu_fixture_{response_id}", "name": "bash", "input": {},
             })
             self.write_event("content_block_delta", index=0, delta={
                 "type": "input_json_delta", "partial_json": json.dumps({
@@ -332,7 +347,7 @@ def run(opencode, ox, root, provider):
                  stdout=subprocess.DEVNULL), start_server(opencode, root, env, paths["project"]) as api:
         wait(ready, "OX gateway model catalog")
         assert api.read("/global/health", authenticate=False, status=401) is None
-        assert api.read("/global/health") == {"healthy": True, "version": VERSION}
+        assert api.read("/global/health")["healthy"] is True
         native = api.read("/path")
         assert native["directory"] == str(paths["project"])
         assert native["state"] == str(paths["state"] / "opencode")
@@ -365,11 +380,11 @@ def run(opencode, ox, root, provider):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("opencode", type=Path, help=f"path to stock OpenCode {VERSION}")
+    parser.add_argument("opencode", type=Path, help="path to a stock OpenCode binary")
     parser.add_argument("ox", type=Path, help="path to the OX gateway executable")
     args = parser.parse_args()
     opencode, ox = (path.resolve(strict=True) for path in (args.opencode, args.ox))
-    assert subprocess.check_output([opencode, "--version"], text=True).strip() == VERSION
+    report_version(opencode)
     with tempfile.TemporaryDirectory(prefix="ox-opencode-contract-") as temp, \
             ThreadingHTTPServer(("127.0.0.1", 0), Provider) as provider:
         provider.key = secrets.token_urlsafe(24)

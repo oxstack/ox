@@ -722,6 +722,7 @@ pub fn provider(route: &Route) -> String {
             "Anthropic (Claude subscription)".into()
         }
         (crate::runtime::Billing::Subscription, Runtime::Antigravity) => "Google".into(),
+        (crate::runtime::Billing::Subscription, Runtime::OpenCode) => "OX API required".into(),
         // A qualified alias names its provider. A bare one does not, so say only
         // which route receives it rather than inventing a provider name.
         (crate::runtime::Billing::Api(alias), _) => match alias.split_once('/') {
@@ -894,6 +895,9 @@ impl HandoffStart {
         Some(start.validate().map(|()| start))
     }
     pub fn validate(&self) -> Result<(), String> {
+        if self.runtime == Runtime::OpenCode {
+            return Err("Hosted OpenCode does not support session handoff.".into());
+        }
         if self.request.trim().is_empty() {
             return Err("Write the request for the new session.".into());
         }
@@ -1304,6 +1308,7 @@ mod tests {
             selection: selection.refs.clone(),
         };
         let (sent, first) = match to {
+            Runtime::OpenCode => panic!("Hosted OpenCode is not a handoff target"),
             Runtime::Claude | Runtime::Antigravity => {
                 let turn = context_turn(&source, &selection, request, to == Runtime::Claude);
                 (turn.clone(), turn)

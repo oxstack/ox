@@ -319,12 +319,17 @@ pub(crate) fn opencode_profile(home: &Path) -> Result<PathBuf, RelayError> {
     let profile = root.join("opencode");
     create_profile_dir(&root)?;
     create_profile_dir(&profile)?;
+    prepare_opencode_profile(&profile)?;
+    Ok(profile)
+}
+
+pub(crate) fn prepare_opencode_profile(profile: &Path) -> Result<(), RelayError> {
     for name in ["cache", "config", "data", "state"] {
         let root = profile.join(name);
         create_profile_dir(&root)?;
         create_profile_dir(&root.join("opencode"))?;
     }
-    Ok(profile)
+    Ok(())
 }
 
 pub(crate) fn codex_profiles(

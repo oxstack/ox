@@ -868,7 +868,7 @@ impl Store {
         }
     }
 }
-fn apply_meta(t: &mut Transcript, d: Value) {
+pub(super) fn apply_meta(t: &mut Transcript, d: Value) {
     t.active_turn = bits(&d["active"]);
     t.last_finished = bits(&d["last_finished"]);
     t.interrupted = d["interrupted"] == true;
@@ -886,7 +886,7 @@ fn apply_meta(t: &mut Transcript, d: Value) {
     t.tier = bits(&d["tier"]);
     t.unread = d["unread"] == true;
 }
-fn apply_item(t: &mut Transcript, i: TimelineItem) -> io::Result<()> {
+pub(super) fn apply_item(t: &mut Transcript, i: TimelineItem) -> io::Result<()> {
     let item = match i.role.as_str() {
         "assistant" => Item::AgentMessage {
             text: i.text,

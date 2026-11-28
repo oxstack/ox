@@ -56,7 +56,7 @@ fn generate_impl(
     cmd.arg(match route.runtime {
         Runtime::Codex => "codex",
         Runtime::Claude => "claude",
-        Runtime::Antigravity => return Ok(None),
+        Runtime::Antigravity | Runtime::OpenCode => return Ok(None),
     });
     match &route.billing {
         Billing::Api(alias) => {
@@ -137,7 +137,7 @@ fn generate_impl(
                 cmd.args(["--model", model]);
             }
         }
-        Runtime::Antigravity => return Ok(None),
+        Runtime::Antigravity | Runtime::OpenCode => return Ok(None),
     }
     let mut child = cmd
         .stdin(Stdio::piped())
@@ -206,7 +206,7 @@ fn generate_impl(
                 }
                 title
             }
-            Runtime::Antigravity => None,
+            Runtime::Antigravity | Runtime::OpenCode => None,
         };
         Ok(title)
     })()

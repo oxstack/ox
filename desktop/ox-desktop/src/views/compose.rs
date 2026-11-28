@@ -11,7 +11,7 @@ use ox_desk_core::actions::Action as DeskAction;
 use ox_desk_core::runtime::{Access, Runtime};
 
 fn native_command(runtime: Runtime, text: &str) -> bool {
-    runtime != Runtime::Antigravity && text.trim_start().starts_with('/')
+    matches!(runtime, Runtime::Codex | Runtime::Claude) && text.trim_start().starts_with('/')
 }
 
 pub(super) fn typed_launch(
@@ -562,12 +562,14 @@ fn default_permission(
         Runtime::Claude => behavior.claude_start,
         Runtime::Codex => behavior.codex_start,
         Runtime::Antigravity => behavior.antigravity_start,
+        Runtime::OpenCode => None,
     };
     match (runtime, start) {
         (_, Some(mode)) => permission_value(mode),
         (Runtime::Claude, None) => "Claude Code default".to_owned(),
         (Runtime::Codex, None) => "Configured in Codex".to_owned(),
         (Runtime::Antigravity, None) => "Antigravity default".to_owned(),
+        (Runtime::OpenCode, None) => "OpenCode permission prompts".to_owned(),
     }
 }
 

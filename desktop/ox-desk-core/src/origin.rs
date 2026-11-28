@@ -289,6 +289,9 @@ impl WorkerStart {
     }
     /// The checks the standalone OX gateway applies, shared by every launcher.
     pub fn validate(&self) -> Result<(), String> {
+        if self.runtime == Runtime::OpenCode {
+            return Err("Hosted OpenCode does not accept worker launches.".into());
+        }
         if !self.runtime.supports_workers() {
             return Err(
                 "Antigravity sessions start from the composer or an operator handoff.".into(),

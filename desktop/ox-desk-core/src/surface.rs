@@ -100,6 +100,7 @@ fn session(route: &Route) -> String {
         (Billing::Subscription, Runtime::Codex) => format!("{runtime} on the ChatGPT subscription"),
         (Billing::Subscription, Runtime::Claude) => format!("{runtime} on the Claude subscription"),
         (Billing::Subscription, Runtime::Antigravity) => format!("{runtime} on the Google account"),
+        (Billing::Subscription, Runtime::OpenCode) => "OpenCode with OX API billing".into(),
         (Billing::Api(alias), _) => format!("{runtime} on the OX API route {alias}"),
     }
 }

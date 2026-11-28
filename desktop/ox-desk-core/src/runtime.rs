@@ -9,6 +9,7 @@ pub enum Runtime {
     Codex,
     Claude,
     Antigravity,
+    OpenCode,
 }
 
 impl Runtime {
@@ -29,7 +30,7 @@ impl Runtime {
     }
     /// Antigravity's native account integration is for interactive work initiated by a user.
     pub fn supports_workers(self) -> bool {
-        self != Self::Antigravity
+        matches!(self, Self::Codex | Self::Claude)
     }
     pub fn route(self, alias: Option<String>) -> Route {
         Route {
@@ -42,6 +43,7 @@ impl Runtime {
             Self::Codex => "codex",
             Self::Claude => "claude",
             Self::Antigravity => "agy",
+            Self::OpenCode => "opencode",
         }
     }
     pub fn account(self) -> &'static str {
@@ -49,6 +51,7 @@ impl Runtime {
             Self::Codex => "ChatGPT",
             Self::Claude => "Claude",
             Self::Antigravity => "Google",
+            Self::OpenCode => "OX API",
         }
     }
     pub fn install_guide(self) -> &'static str {
@@ -56,6 +59,7 @@ impl Runtime {
             Self::Codex => "https://developers.openai.com/codex/cli/",
             Self::Claude => "https://code.claude.com/docs/en/setup",
             Self::Antigravity => "https://antigravity.google/docs/cli/",
+            Self::OpenCode => "https://opencode.ai/docs/",
         }
     }
     pub fn name(self) -> &'static str {
@@ -63,6 +67,7 @@ impl Runtime {
             Self::Codex => "Codex",
             Self::Claude => "Claude Code",
             Self::Antigravity => "Antigravity",
+            Self::OpenCode => "OpenCode",
         }
     }
 }
@@ -116,6 +121,8 @@ impl Route {
             (Billing::Api(alias), Runtime::Codex) => format!("OX API · {alias}"),
             (Billing::Api(alias), Runtime::Claude) => format!("Claude Code · OX API · {alias}"),
             (Billing::Api(_), Runtime::Antigravity) => "Antigravity · unsupported route".into(),
+            (Billing::Api(alias), Runtime::OpenCode) => format!("OpenCode · OX API · {alias}"),
+            (Billing::Subscription, Runtime::OpenCode) => "OpenCode · unsupported route".into(),
         }
     }
 }
@@ -161,6 +168,7 @@ impl Access {
                 Self::BypassPermissions,
             ],
             Runtime::Antigravity => &[Self::Default, Self::Plan, Self::AcceptEdits, Self::Yolo],
+            Runtime::OpenCode => &[],
         }
     }
     pub fn bypasses_permissions(self) -> bool {
@@ -199,6 +207,9 @@ impl Access {
 
 /// Stock CLI arguments, with the verified provider and native session identity.
 pub fn terminal_args(route: &Route, provider: &str, thread: Option<&str>) -> Vec<String> {
+    if route.runtime == Runtime::OpenCode {
+        return Vec::new();
+    }
     if route.runtime == Runtime::Antigravity {
         return vec![route.runtime.executable().into()];
     }
