@@ -433,6 +433,31 @@ h1 {
   background: var(--accent);
   margin: 0 0.5rem 0.11rem 0;
 }
+#memory-activity {
+  border-inline-start: 2px solid var(--accent);
+  padding-inline-start: 0.65rem;
+  margin-block: 0.5rem 0.9rem;
+  font-size: 0.82rem;
+}
+.memory-activity-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0 0.6rem;
+  color: var(--muted);
+}
+#manage-session-memory {
+  min-height: 2rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+}
+#memory-activity ul {
+  margin: 0;
+  padding-inline-start: 1rem;
+}
 #conversation h1 {
   margin: 0.25rem 0 0.55rem;
   overflow-wrap: anywhere;

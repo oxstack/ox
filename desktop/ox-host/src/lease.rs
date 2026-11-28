@@ -41,6 +41,13 @@ enum Request {
         parent: Option<String>,
         call: serde_json::Value,
     },
+    /// A hosted memory call reports its outcome on the same connection after
+    /// receiving its turn binding. Terminal callers do not use this endpoint.
+    MemoryReceipt {
+        scope: ox_desk_core::host_protocol::Scope,
+        parent: Option<String>,
+        lease: String,
+    },
 }
 
 pub(crate) struct Endpoint {
@@ -166,15 +173,7 @@ fn serve(
 ) -> io::Result<()> {
     same_user(&socket)?;
     socket.set_read_timeout(Some(Duration::from_secs(5)))?;
-    let mut size_buf = [0; 4];
-    socket.read_exact(&mut size_buf)?;
-    let size = u32::from_be_bytes(size_buf) as usize;
-    if size > 16384 {
-        return Err(io::Error::other("Worker lease frame too large"));
-    }
-    let mut frame = vec![0; size];
-    socket.read_exact(&mut frame)?;
-    match serde_json::from_slice(&frame)? {
+    match frame(&mut socket, 16384)? {
         Request::WorkerPlacement => socket.write_all(&[1])?,
         Request::Lease { id, parent } => {
             groups.lock().unwrap().register(&id, parent, &socket)?;
@@ -223,8 +222,48 @@ fn serve(
                 Err(error) => reply(&mut socket, Err(error))?,
             }
         }
+        Request::MemoryReceipt {
+            scope,
+            parent,
+            lease,
+        } => {
+            if !groups.lock().unwrap().0.contains_key(&lease) {
+                return Ok(());
+            }
+            let (done, result) = mpsc::sync_channel(1);
+            tx.send(Message::MemoryBegin {
+                scope,
+                hint: parent,
+                reply: done,
+            })
+            .map_err(io::Error::other)?;
+            let Ok(Some(turn)) = result.recv_timeout(Duration::from_secs(2)) else {
+                return Ok(());
+            };
+            socket.write_all(&[1])?;
+            socket.set_read_timeout(Some(Duration::from_secs(30)))?;
+            let outcome: ox_memory::Receipt = frame(&mut socket, 512)?;
+            if groups.lock().unwrap().0.contains_key(&lease)
+                && !matches!(outcome, ox_memory::Receipt::Recalled { count } if count > 20)
+            {
+                tx.send(Message::MemoryFinish(turn, outcome))
+                    .map_err(io::Error::other)?;
+            }
+        }
     }
     Ok(())
+}
+
+fn frame<T: serde::de::DeserializeOwned>(socket: &mut UnixStream, limit: usize) -> io::Result<T> {
+    let mut size = [0; 4];
+    socket.read_exact(&mut size)?;
+    let size = u32::from_be_bytes(size) as usize;
+    if size > limit {
+        return Err(io::Error::other("Worker lease frame too large"));
+    }
+    let mut body = vec![0; size];
+    socket.read_exact(&mut body)?;
+    Ok(serde_json::from_slice(&body)?)
 }
 
 #[cfg(test)]

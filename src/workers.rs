@@ -332,7 +332,12 @@ fn recall_ceiling(local_only: Option<&str>, cap: Option<&str>) -> ox_memory::Sen
 }
 
 impl Service {
-    async fn recall_memory(&self, req: RecallMemory) -> Result<Value, String> {
+    async fn recall_memory(
+        &self,
+        req: RecallMemory,
+        thread: Option<&str>,
+    ) -> Result<Value, String> {
+        let report = crate::host_lifetime::MemoryReceipt::begin(&self.cwd, thread).await;
         let cwd = self.cwd.clone();
         let ceiling = memory_sensitivity_ceiling();
         tokio::task::spawn_blocking(move || {
@@ -385,6 +390,11 @@ impl Service {
                     })
                 })
                 .collect();
+            if let Some(report) = report {
+                report.finish(ox_memory::Receipt::Recalled {
+                    count: memories.len() as u8,
+                });
+            }
             Ok(json!({
                 "project": project,
                 "memories": memories,
@@ -394,7 +404,8 @@ impl Service {
         .map_err(|_| "Memory recall task failed.".to_string())?
     }
 
-    async fn save_memory(&self, req: SaveMemory) -> Result<Value, String> {
+    async fn save_memory(&self, req: SaveMemory, thread: Option<&str>) -> Result<Value, String> {
+        let report = crate::host_lifetime::MemoryReceipt::begin(&self.cwd, thread).await;
         let secrets = self.worker_secrets().await.unwrap_or_default();
         let cwd = self.cwd.clone();
         tokio::task::spawn_blocking(move || {
@@ -408,6 +419,11 @@ impl Service {
                     .filter(|s| !s.is_empty())
                     .ok_or_else(|| "Provide id when forget is true.".to_string())?;
                 let removed = store.forget(id, &host).map_err(|e| e.to_string())?;
+                if let Some(report) = report {
+                    report.finish(ox_memory::Receipt::Forgotten {
+                        scope: (&removed.scope).into(),
+                    });
+                }
                 return Ok(json!({
                     "action": "forgotten",
                     "id": removed.id,
@@ -461,6 +477,16 @@ impl Service {
                 })
                 .map_err(|e| e.to_string())?;
             let e = outcome.entry();
+            if let Some(report) = report {
+                use ox_memory::{Receipt, UpsertOutcome};
+                let scope = (&e.scope).into();
+                let receipt = match outcome {
+                    UpsertOutcome::Created(_) => Receipt::Saved { scope },
+                    UpsertOutcome::Updated(_) => Receipt::Updated { scope },
+                    UpsertOutcome::Deduplicated(_) => Receipt::Deduplicated { scope },
+                };
+                report.finish(receipt);
+            }
             Ok(json!({
                 "action": outcome.action(),
                 "id": e.id,
@@ -783,7 +809,7 @@ impl Service {
                         .cloned()
                         .unwrap_or_else(|| json!({})),
                 ) {
-                    Ok(req) => tool_result(self.recall_memory(req).await),
+                    Ok(req) => tool_result(self.recall_memory(req, thread).await),
                     Err(_) => {
                         return rpc_error(
                             id.clone(),
@@ -794,7 +820,7 @@ impl Service {
                 },
                 Some("save_ox_memory") => {
                     match serde_json::from_value::<SaveMemory>(params["arguments"].clone()) {
-                        Ok(req) => tool_result(self.save_memory(req).await),
+                        Ok(req) => tool_result(self.save_memory(req, thread).await),
                         Err(_) => {
                             return rpc_error(
                                 id.clone(),
@@ -1725,16 +1751,19 @@ mod tests {
         assert!(names.contains(&"save_ox_memory"));
 
         let saved = service
-            .save_memory(SaveMemory {
-                text: Some("Use Claude subscription for confidential banking work.".to_owned()),
-                id: None,
-                forget: false,
-                scope: Some("global".to_owned()),
-                kind: Some("routing_policy".to_owned()),
-                sensitivity: Some("private".to_owned()),
-                pin: true,
-                tags: vec!["routing".to_owned(), "claude".to_owned()],
-            })
+            .save_memory(
+                SaveMemory {
+                    text: Some("Use Claude subscription for confidential banking work.".to_owned()),
+                    id: None,
+                    forget: false,
+                    scope: Some("global".to_owned()),
+                    kind: Some("routing_policy".to_owned()),
+                    sensitivity: Some("private".to_owned()),
+                    pin: true,
+                    tags: vec!["routing".to_owned(), "claude".to_owned()],
+                },
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(saved["action"], "created");
@@ -1746,12 +1775,15 @@ mod tests {
         let id = saved["id"].as_str().unwrap().to_owned();
 
         let recalled = service
-            .recall_memory(RecallMemory {
-                query: "which provider for confidential banking".to_owned(),
-                scope: None,
-                kind: None,
-                limit: Some(5),
-            })
+            .recall_memory(
+                RecallMemory {
+                    query: "which provider for confidential banking".to_owned(),
+                    scope: None,
+                    kind: None,
+                    limit: Some(5),
+                },
+                None,
+            )
             .await
             .unwrap();
         let memories = recalled["memories"].as_array().unwrap();
@@ -1760,22 +1792,25 @@ mod tests {
         assert_eq!(memories[0]["kind"], "routing_policy");
 
         let forgotten = service
-            .save_memory(SaveMemory {
-                text: None,
-                id: Some(id),
-                forget: true,
-                scope: None,
-                kind: None,
-                sensitivity: None,
-                pin: false,
-                tags: Vec::new(),
-            })
+            .save_memory(
+                SaveMemory {
+                    text: None,
+                    id: Some(id),
+                    forget: true,
+                    scope: None,
+                    kind: None,
+                    sensitivity: None,
+                    pin: false,
+                    tags: Vec::new(),
+                },
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(forgotten["action"], "forgotten");
 
         let after = service
-            .recall_memory(RecallMemory::default())
+            .recall_memory(RecallMemory::default(), None)
             .await
             .unwrap();
         assert!(after["memories"].as_array().unwrap().is_empty());

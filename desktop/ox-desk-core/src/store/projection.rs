@@ -269,6 +269,9 @@ impl Store {
         if let Some(attachment) = self.memory_attachments.get(id) {
             detail["memory_attachment"] = json!(attachment);
         }
+        if let Some(activity) = self.memory_activity.get(id) {
+            detail["memory_activity"] = crate::memory::project_activity(activity);
+        }
         if let Some(result) = t.and_then(|t| t.last_result.as_ref()) {
             detail["last_result"] = json!(result);
         }

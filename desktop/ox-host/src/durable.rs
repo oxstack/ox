@@ -155,6 +155,8 @@ pub(crate) struct SavedSession {
     last_result: Option<SessionResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     memory_attachment: Option<ox_desk_core::memory::Attachment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    memory_activity: Vec<ox_desk_core::memory::Activity>,
 }
 impl SavedScope {
     pub(crate) fn from_state(s: &ScopeState) -> Self {
@@ -189,6 +191,8 @@ impl SavedScope {
                         r.detail["memory_attachment"].clone(),
                     )
                     .ok(),
+                    memory_activity: serde_json::from_value(r.detail["memory_activity"].clone())
+                        .unwrap_or_default(),
                 }
             })
             .collect();
@@ -234,6 +238,10 @@ impl SavedScope {
                     });
                     if let Some(attachment) = &s.memory_attachment {
                         detail["memory_attachment"] = serde_json::json!(attachment);
+                    }
+                    if !s.memory_activity.is_empty() {
+                        detail["memory_activity"] =
+                            ox_desk_core::memory::project_activity(&s.memory_activity);
                     }
                     if let Some(result) = &s.last_result {
                         detail["last_result"] = serde_json::json!(result);
@@ -700,6 +708,7 @@ mod tests {
                 outcome: SessionOutcome::Completed,
             }),
             memory_attachment: None,
+            memory_activity: vec![],
         };
         let saved = |scope: &Scope, sessions| SavedScope {
             scope: scope.clone(),

@@ -48,11 +48,26 @@ pub(crate) enum Message {
         request: Box<Gateway>,
         reply: Replier,
     },
+    MemoryBegin {
+        scope: Scope,
+        hint: Option<String>,
+        reply: SyncSender<Option<MemoryTurn>>,
+    },
+    MemoryFinish(MemoryTurn, ox_memory::Receipt),
     Stop,
     Replace(PathBuf, std::os::unix::net::UnixStream),
     /// Upgrade handover: refuse new turns, let running turns finish until the
     /// deadline, then stop. The next host reads why the previous one stopped.
     Drain(Duration),
+}
+
+/// The private gateway holds this binding while its memory operation runs.
+/// It cannot submit a different scope, session, or turn with the outcome.
+pub(crate) struct MemoryTurn {
+    scope: Scope,
+    session: String,
+    turn: String,
+    generation: u64,
 }
 /// A handoff target waiting for its first turn to be accepted.
 pub(crate) struct Confirming {
@@ -636,6 +651,19 @@ impl Engine {
                     }
                     Gateway::Call(call) => self.dispatch_parent_call(&caller, call, reply)?,
                 },
+                Some(Message::MemoryBegin { scope, hint, reply }) => {
+                    if let Some(live) = self.running.get(&scope) {
+                        let batch = live.inbox.take();
+                        if !batch.is_empty() {
+                            self.process(&scope, batch, false)?;
+                        }
+                    }
+                    let binding = self.memory_turn(scope, hint.as_deref());
+                    let _ = reply.send(binding);
+                }
+                Some(Message::MemoryFinish(turn, outcome)) => {
+                    self.memory_finished(turn, outcome)?
+                }
                 Some(Message::Connect(id, peer)) => {
                     self.clients.insert(
                         id,
@@ -1458,6 +1486,9 @@ impl Engine {
                 serde_json::from_value(saved.detail["memory_attachment"].clone())
             {
                 store.remember_memory_attachment(&saved.id, attachment);
+            }
+            if let Ok(activity) = serde_json::from_value(saved.detail["memory_activity"].clone()) {
+                store.restore_memory_activity(&saved.id, activity);
             }
         }
         let mut state = store.host_snapshot(scope);
@@ -2581,6 +2612,34 @@ impl Engine {
                 .and_then(|_| crate::workers::source_level(ceiling, parent_origin.as_ref())),
         };
         Ok((project, parent, source, external))
+    }
+    fn memory_turn(&self, scope: Scope, hint: Option<&str>) -> Option<MemoryTurn> {
+        let live = self.running.get(&scope)?;
+        let session = crate::policy::single_parent(&live.store, hint).ok()?;
+        let turn = live.store.transcript(&session)?.active_turn()?.to_owned();
+        Some(MemoryTurn {
+            scope,
+            session,
+            turn,
+            generation: live.generation,
+        })
+    }
+
+    fn memory_finished(&mut self, turn: MemoryTurn, outcome: ox_memory::Receipt) -> io::Result<()> {
+        let Some(live) = self.running.get_mut(&turn.scope) else {
+            return Ok(());
+        };
+        if live.generation != turn.generation || live.store.transcript(&turn.session).is_none() {
+            return Ok(());
+        }
+        live.store.record_memory_activity(
+            &turn.session,
+            ox_desk_core::memory::Activity {
+                turn: turn.turn,
+                outcome,
+            },
+        );
+        self.process(&turn.scope, vec![], false)
     }
     fn accept_launch(&mut self, caller: &Caller, start: WorkerStart) -> Result<Accepted, String> {
         start.validate()?;
@@ -3887,6 +3946,7 @@ fn restore_row(row: &mut wire::SessionView, saved: &wire::SessionView) {
         "worker_notice",
         "last_result",
         "memory_attachment",
+        "memory_activity",
     ] {
         if row.detail[key].is_null() && !saved.detail[key].is_null() {
             row.detail[key] = saved.detail[key].clone();
@@ -4690,6 +4750,77 @@ mod tests {
                 max_minutes: None,
                 subscription_model: None,
             }
+        }
+
+        #[test]
+        fn memory_outcomes_keep_the_scope_and_turn_captured_before_the_call() {
+            let root = tempfile::tempdir().unwrap();
+            let (tx, _rx) = std::sync::mpsc::sync_channel(64);
+            let mut engine = Engine::open(config(root.path()), root.path(), tx).unwrap();
+            let (scope, other_route) = scopes(root.path());
+            let rows = || {
+                vec![
+                    view(&scope, "a", "running", "workspace"),
+                    view(&scope, "b", "running", "workspace"),
+                ]
+            };
+            engine
+                .running
+                .insert(scope.clone(), live(&scope, rows(), &["a", "b"], vec![]).0);
+            engine.running.insert(
+                other_route.clone(),
+                live(
+                    &other_route,
+                    vec![view(&other_route, "a", "running", "workspace")],
+                    &["a"],
+                    vec![],
+                )
+                .0,
+            );
+            assert!(engine.memory_turn(scope.clone(), None).is_none());
+            assert!(engine.memory_turn(scope.clone(), Some("missing")).is_none());
+            let binding = engine.memory_turn(scope.clone(), Some("a")).unwrap();
+
+            // The receipt returns after the caller has already begun the next turn.
+            let next = Timeline {
+                items: vec![],
+                detail: json!({"active": "t2", "ready": true}),
+            };
+            engine.running.insert(
+                scope.clone(),
+                live_with(
+                    &scope,
+                    rows(),
+                    vec![("a", next.clone()), ("b", next)],
+                    vec![],
+                )
+                .0,
+            );
+            let outcome = ox_memory::Receipt::Recalled { count: 0 };
+            engine.memory_finished(binding, outcome).unwrap();
+            let activity = |state: &ScopeState, id: &str| {
+                state.sessions.iter().find(|r| r.id == id).unwrap().detail["memory_activity"]
+                    .clone()
+            };
+            let a = activity(&engine.running[&scope].state, "a");
+            assert_eq!(a[0]["turn"], "t1");
+            assert_eq!(a[0]["outcome"], json!({"action":"recalled", "count":0}));
+            assert!(activity(&engine.running[&scope].state, "b").is_null());
+            assert!(activity(&engine.running[&other_route].state, "a").is_null());
+            let recovered = engine
+                .ledger
+                .data
+                .scopes
+                .iter()
+                .find(|saved| saved.scope == scope)
+                .unwrap()
+                .recover();
+            assert_eq!(activity(&recovered, "a"), a);
+
+            let old_runtime = engine.memory_turn(scope.clone(), Some("a")).unwrap();
+            engine.running.get_mut(&scope).unwrap().generation += 1;
+            engine.memory_finished(old_runtime, outcome).unwrap();
+            assert_eq!(activity(&engine.running[&scope].state, "a"), a);
         }
 
         #[test]
