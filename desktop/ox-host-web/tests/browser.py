@@ -263,8 +263,8 @@ class Host(socketserver.StreamRequestHandler):
                     }
                     state = {
                         "scope": f.scope,
-                        "connection": "ready",
-                        "capabilities": f.caps,
+                        "connection": "ready" if f.claude_signed_in else "sign_in_required",
+                        "capabilities": f.caps if f.claude_signed_in else [],
                         "sessions": f.sessions,
                         "asks": [] if f.answered else [ask],
                         "transcripts": {"parent": {"items": [item], "detail": {}},
@@ -891,6 +891,7 @@ def run(harness, screenshot=None):
         host.antigravity_scope = dict(host.scope, route={"runtime": "antigravity", "billing": "subscription"})
         host.antigravity_signed_in = False
         host.antigravity_session = None
+        host.claude_signed_in = True
         now = int(time.time())
         Path(host.scope["project"]).mkdir()
         host.caps = ["start", "access", "model_options", "native_commands"]
@@ -1450,7 +1451,19 @@ def run(harness, screenshot=None):
                 route.value=[...route.options].find(o=>o.text==='Claude subscription').value;
                 document.getElementById('new-form').requestSubmit();""")
 
+        host.claude_signed_in = False
         continue_on_claude()
+        wait(lambda: js("return !document.getElementById('runtime-setup').hidden && "
+                        "document.getElementById('runtime-setup-text').innerText.includes('Sign in with Claude on Laptop')"))
+        assert js("return document.getElementById('project-setup-starter').hidden")
+        type_draft("Keep this draft while I sign in.")
+        assert js("return document.getElementById('send').disabled")
+        host.claude_signed_in = True
+        js("document.getElementById('runtime-setup-reconnect').click()")
+        wait(lambda: js("return document.getElementById('runtime-setup').hidden && !document.getElementById('send').disabled"))
+        assert js("return document.getElementById('draft').value") == "Keep this draft while I sign in."
+        assert js("return !document.getElementById('project-setup-starter').hidden")
+        type_draft("")
         wait(
             lambda: js(
                 "return document.getElementById('network').innerText==='Connected' && document.getElementById('title').innerText==='New session'"

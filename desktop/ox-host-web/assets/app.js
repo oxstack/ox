@@ -366,6 +366,7 @@ class Link {
   }
   async start() {
     if (this.closed) return;
+    this.openFailed = false;
     const generation = ++this.generation;
     try {
       const signed = await proof(key, "connect");
@@ -529,6 +530,11 @@ class Link {
     }
     if (msg.type === "ack" || msg.type === "error") {
       if (msg.type === "error") {
+        // A subscription can fail before the host has a scope snapshot to send.
+        if (this === detailLink && !this.ready && msg.id == null) {
+          this.openFailed = true;
+          updateComposerState();
+        }
         this.opens.delete(msg.id);
         if (msg.id && msg.id === this.discovery) {
           cold = this.discovering;
@@ -1780,6 +1786,26 @@ function updateComposerState() {
   const canSend = id
     ? caps.some((c) => c === "send" || c === "steer")
     : s?.capabilities.includes("start");
+  $("project-setup-starter").hidden = Boolean(id) || !detailLink?.ready || !canSend;
+  const { runtime, billing } = scope.route;
+  const needsSetup = !id && !canSend && (runtime === "codex" || runtime === "claude");
+  const connection = detailLink?.ready ? s?.connection : detailLink?.openFailed ? "closed" : null;
+  const signIn = connection === "sign_in_required" && billing === "subscription";
+  const waiting = connection === "connecting";
+  const setup = $("runtime-setup");
+  setup.hidden = !needsSetup || !(signIn || waiting || connection === "closed");
+  if (!setup.hidden) {
+    const host = connectedHostName();
+    const agent = runtime === "codex" ? "Codex" : "Claude Code";
+    const account = runtime === "codex" ? "ChatGPT" : "Claude";
+    const text = signIn
+      ? `Sign in with ${account} on ${host} to send this draft.`
+      : waiting ? `Connecting to ${agent} on ${host}…` : `${agent} cannot start on ${host}.`;
+    if ($("runtime-setup-text").textContent !== text) $("runtime-setup-text").textContent = text;
+    $("runtime-setup-actions").hidden = waiting;
+    $("runtime-setup-accounts").hidden = !signIn;
+    $("runtime-setup-hosts").hidden = signIn || waiting;
+  }
   const command = composerCommand($("draft").value);
   commandSuggestions(command);
   const canRun = localCommands.has(command) || inputCaps.includes("native_commands");
@@ -1813,14 +1839,26 @@ $("worker-review-starter").onclick = () => {
   if (selected?.id) suggestPrompt(workerReviewPrompt);
 };
 $("project-setup-starter").onclick = () => {
-  if (selected && !selected.id)
+  if (!$("project-setup-starter").hidden)
     suggestPrompt("Help me set up this project. Read its setup instructions, check the prerequisites, and explain the next steps. Ask before changing my machine or installing anything.");
+};
+$("runtime-setup-accounts").onclick = () => {
+  if (!selected || selected.id) return;
+  const { scope } = selected;
+  void phoneSettings.openAccounts(() => open(scope, null));
+};
+$("runtime-setup-hosts").onclick = () => {
+  if (!selected || selected.id) return;
+  const { scope } = selected;
+  void phoneSettings.openHosts(() => open(scope, null), "← Draft");
+};
+$("runtime-setup-reconnect").onclick = () => {
+  if (selected && !selected.id) open(selected.scope, null);
 };
 
 let workerResultsKey;
 function renderWorkerResults(scope, id, row) {
   const list = $("worker-results-list");
-  $("project-setup-starter").hidden = Boolean(id) || !detailLink?.ready;
   if (!id) {
     $("worker-results").hidden = true;
     $("worker-review-starter").hidden = true;

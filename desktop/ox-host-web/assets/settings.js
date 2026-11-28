@@ -237,10 +237,10 @@ export function setupSettings({ request, open, close, pushStatus, enablePush, lo
   applyLocal();
   systemLight.addEventListener("change", applyLocal);
   window.addEventListener("ox-native-login-finished", async () => {
-    const id = accountsPage;
-    if (panel.hidden || id !== pageId) return;
+    if (panel.hidden || !accountsPage || accountsPage.id !== pageId) return;
+    const { id, show } = accountsPage;
     try {
-      await load(accounts);
+      await load(show);
     } catch (err) {
       if (id === pageId && !panel.hidden) status.textContent = err.message;
     }
@@ -480,23 +480,25 @@ export function setupSettings({ request, open, close, pushStatus, enablePush, lo
     for (const message of snapshot?.issues || [])
       body.append(node("p", message));
   }
-  document.getElementById("open-phone-settings").onclick = async () => {
+  async function openSettings(show = menu, back = close, backLabel) {
     open();
-    const id = screen("Settings", close);
+    const id = screen("Settings", back, backLabel);
     status.textContent = "Loading host settings…";
     try {
-      await load();
+      await load(show);
     } catch (err) {
       if (id === pageId) {
         snapshot = null;
-        menu();
+        if (show === menu) menu();
         status.textContent = err.message;
       }
     }
-  };
-  async function accounts() {
-    const id = screen("Accounts");
-    accountsPage = id;
+  }
+  document.getElementById("open-phone-settings").onclick = () => openSettings();
+  async function accounts(back = menu, backLabel) {
+    const show = () => accounts(back, backLabel);
+    const id = screen("Accounts", back, backLabel);
+    accountsPage = { id, show };
     const deviceStatus = await readPage(id, { action: "devices" });
     if (!deviceStatus) return;
     const granted = deviceStatus.devices.some(
@@ -556,7 +558,7 @@ export function setupSettings({ request, open, close, pushStatus, enablePush, lo
     await agentsCard(id);
     if (id !== pageId || panel.hidden) return;
     body.append(
-      action("Refresh accounts", () => load(accounts)),
+      action("Refresh accounts", () => load(show)),
       button("Configure API provider", providers),
     );
   }
@@ -1828,6 +1830,9 @@ export function setupSettings({ request, open, close, pushStatus, enablePush, lo
   }
   return {
     memory,
+    openAccounts(back) {
+      return openSettings(() => accounts(back, "← Draft"), back, "← Draft");
+    },
     openNotifications() {
       open();
       return notificationPreferences(close);
