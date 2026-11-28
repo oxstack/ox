@@ -620,7 +620,8 @@ mod tests {
         let legacy_dir = socket_dir(&root, &legacy, true).unwrap().unwrap();
         let old_dir = socket_dir(&root, &current, true).unwrap().unwrap();
         let legacy_socket = UnixListener::bind(legacy_dir.join(format!("{default}.sock"))).unwrap();
-        let socket = UnixListener::bind(old_dir.join(format!("{custom}.sock"))).unwrap();
+        let socket_path = old_dir.join(format!("{custom}.sock"));
+        let socket = UnixListener::bind(&socket_path).unwrap();
         activate(&root, &current, Some(&legacy)).unwrap();
         write_private_file(&states.join(&custom), current.id()).unwrap();
         activate(&root, &replacement, Some(&legacy)).unwrap();
@@ -641,12 +642,15 @@ mod tests {
                 .0,
             legacy
         );
-        drop(socket);
+        // The daemon removes its socket path on teardown. Dropping only the
+        // listener can leave an inherited descriptor alive in a parallel test's child.
+        fs::remove_file(socket_path).unwrap();
         assert!(
             active_component(&root, &states, &custom, installed.legacy.as_ref())
                 .unwrap()
                 .is_none()
         );
+        drop(socket);
         drop(legacy_socket);
         fs::remove_dir_all(&legacy_dir).unwrap();
         fs::remove_dir_all(&old_dir).unwrap();
