@@ -176,6 +176,9 @@ header[data-sky]:before {
 }
 #location {
   font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 #network {
   margin-left: auto;
@@ -432,6 +435,15 @@ h1 {
 }
 #conversation h1 {
   margin: 0.25rem 0 0.55rem;
+  overflow-wrap: anywhere;
+}
+#start-worker {
+  flex: 0 0 auto;
+  padding-inline: 0.55rem;
+  font-size: 0.82rem;
+}
+#worker-heading:focus {
+  outline: none;
 }
 #timeline {
   display: flex;
@@ -1574,7 +1586,7 @@ main:has(#conversation:not([hidden])) {
   color: var(--warning);
 }
 
-#worker-form,
+#worker-sheet,
 #handoff-form {
   position: fixed;
   right: 0;
@@ -1589,6 +1601,44 @@ main:has(#conversation:not([hidden])) {
   background: var(--panel);
   border-top: 2px solid var(--line-strong);
   box-shadow: none;
+}
+#worker-sheet {
+  top: auto;
+  width: 100%;
+  max-width: none;
+  overflow: hidden;
+  padding: 0;
+  border-inline: 0;
+  border-bottom: 0;
+  color: var(--ink);
+}
+#worker-sheet::backdrop {
+  background: color-mix(in srgb, var(--nav) 60%, transparent);
+}
+#worker-form:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(80dvh - 2px);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+}
+#worker-message {
+  margin: 0;
+  padding: 0.35rem 16px;
+}
+.worker-sheet-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 16px;
+}
+.worker-sheet-actions {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0.45rem 16px max(0.45rem, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line);
 }
 .sheet-title {
   margin: 0 0 8px;
@@ -1739,4 +1789,20 @@ main:has(#conversation:not([hidden])) {
   max-height: 15dvh;
   overflow: auto;
   white-space: pre-wrap;
+}
+
+.worker-results {
+  margin: 0.5rem 0;
+  border-block: 1px solid var(--line);
+}
+.worker-results > summary {
+  padding: 0.75rem 0;
+  cursor: pointer;
+}
+.worker-result-row {
+  padding: 0 0 0.75rem;
+}
+.worker-result-row > button {
+  min-height: 44px;
+  text-align: left;
 }

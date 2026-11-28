@@ -446,6 +446,14 @@ impl Workbench {
         let view = self.transcript_views.get_mut(id).unwrap();
         let owner = id.to_owned();
         let mut frame = col().w_full().min_w_0().px_3().py_1().gap_1();
+        use crate::platform::restore_probe::{self, Milestone};
+        if self.front && restore_probe::wants(id, Milestone::TranscriptVisible) {
+            frame = frame.relative().child(
+                canvas(|_, _, _| (), restore_probe::transcript_painted)
+                    .absolute()
+                    .size_full(),
+            );
+        }
         if let Some(stats) = &mut self.stats {
             if stats
                 .tail_owner

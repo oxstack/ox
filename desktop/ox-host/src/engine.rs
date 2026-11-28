@@ -234,6 +234,8 @@ struct Live {
     /// thread/start. Its launcher hears the outcome only once they do.
     confirming: Option<Confirming>,
     opening: Option<(u64, String)>,
+    /// Existing Codex turns waiting for native admission, keyed by action ID.
+    awaiting_input: HashMap<String, AwaitingInput>,
     terminal: Option<(u64, String)>,
     schema_started: bool,
     recovered: Vec<wire::SessionView>,
@@ -248,6 +250,12 @@ struct Live {
     /// next scoped subscriber (or a replayed request) receives it until the
     /// deadline, after which it is dropped so the runtime can be reaped.
     held_handoff: Option<(String, Server, Instant)>,
+}
+
+struct AwaitingInput {
+    client: u64,
+    thread: String,
+    digest: [u8; 32],
 }
 
 /// How long a terminal handoff waits for a client to take it before it is dropped.
@@ -1082,12 +1090,32 @@ impl Engine {
                         fail("Open this project and billing route before sending actions".into()),
                     );
                 };
+                let hash = digest(&action, &approval)?;
+                if let Some(input) = self
+                    .running
+                    .get_mut(&scope)
+                    .unwrap()
+                    .awaiting_input
+                    .get_mut(&key)
+                {
+                    if input.digest != hash {
+                        return self.reply(
+                            id,
+                            fail("Action ID was reused for a different request".into()),
+                        );
+                    }
+                    // Connections are numbered in accept order. The retry can arrive
+                    // before the old socket's Disconnect, or an old write can arrive late.
+                    if id > input.client || !self.clients.contains_key(&input.client) {
+                        input.client = id;
+                    }
+                    return Ok(());
+                }
                 if (self.draining.is_some() || self.update_reserved())
                     && crate::handover::starts_work(&action)
                 {
                     return self.reply(id, fail(crate::handover::REFUSAL.into()));
                 }
-                let hash = digest(&action, &approval)?;
                 match self
                     .receipts
                     .get(&scope, &key, generation, hash)
@@ -1137,6 +1165,14 @@ impl Engine {
                     Ok(None) => (),
                 }
                 let ends = matches!(action, Action::EndSession(_) | Action::ForceEndSession(_));
+                let input_thread = match &action {
+                    Action::SendText(Some(thread), _) | Action::SendImages(Some(thread), _, _)
+                        if scope.route.runtime == ox_desk_core::runtime::Runtime::Codex =>
+                    {
+                        Some(thread.clone())
+                    }
+                    _ => None,
+                };
                 let result = match self.act(id, &key, &scope, action, approval) {
                     Ok(()) => Server::Ack { id: key.clone() },
                     Err(e) => fail(e.to_string()),
@@ -1144,8 +1180,26 @@ impl Engine {
                 let accepted = matches!(result, Server::Ack { .. });
                 // Only accepted actions are receipts. A refusal is often transient, so a corrected
                 // retry with the same key must run again rather than replay the refusal.
-                let waiting = accepted && self.waiting_open_client(&scope, &key).is_some();
-                if accepted {
+                let awaiting_input = accepted
+                    && input_thread.is_some_and(|thread| {
+                        let live = self.running.get_mut(&scope).expect("accepted send");
+                        if !live.store.track_codex_input(&thread) {
+                            return false;
+                        }
+                        live.awaiting_input.insert(
+                            key.clone(),
+                            AwaitingInput {
+                                client: id,
+                                thread,
+                                digest: hash,
+                            },
+                        );
+                        true
+                    });
+                let waiting = awaiting_input
+                    || (accepted && self.waiting_open_client(&scope, &key).is_some());
+                // Keep in-flight input outside the bounded completed-receipt cache.
+                if accepted && !awaiting_input {
                     self.receipts
                         .insert(scope.clone(), key, generation, hash, result.clone());
                 }
@@ -1400,6 +1454,11 @@ impl Engine {
                 .ok()
                 .flatten();
             store.restore_ended(&saved.id, &saved.title, saved.updated_at, access);
+            if let Ok(attachment) =
+                serde_json::from_value(saved.detail["memory_attachment"].clone())
+            {
+                store.remember_memory_attachment(&saved.id, attachment);
+            }
         }
         let mut state = store.host_snapshot(scope);
         restore(&mut state.sessions, &recovered);
@@ -1439,6 +1498,7 @@ impl Engine {
                 fork_origin: None,
                 confirming: None,
                 opening: None,
+                awaiting_input: Default::default(),
                 terminal: None,
                 schema_started: false,
                 recovered,
@@ -2139,6 +2199,27 @@ impl Engine {
             });
         }
         let mut created = Vec::new();
+        live.awaiting_input.retain(|key, input| {
+            let Some(result) = live.store.take_codex_input_delivery(&input.thread) else {
+                return true;
+            };
+            let frame = match result {
+                Ok(()) => Server::Ack { id: key.clone() },
+                Err(message) => Server::Error {
+                    id: Some(key.clone()),
+                    message,
+                },
+            };
+            self.receipts.insert(
+                scope.clone(),
+                key.clone(),
+                live.generation,
+                input.digest,
+                frame.clone(),
+            );
+            created.push((input.client, frame));
+            false
+        });
         let antigravity = scope.route.runtime == ox_desk_core::runtime::Runtime::Antigravity;
         if let Some(thread) = opened
             && let Some((id, key)) = live.opening.take()
@@ -3262,6 +3343,7 @@ impl Engine {
             && live.launching.is_none()
             && live.confirming.is_none()
             && live.opening.is_none()
+            && live.awaiting_input.is_empty()
             && live.terminal.is_none()
             && live.held_handoff.is_none()
             && !self.mode_requests.values().any(|r| &r.scope == scope);
@@ -3804,6 +3886,7 @@ fn restore_row(row: &mut wire::SessionView, saved: &wire::SessionView) {
         "origin",
         "worker_notice",
         "last_result",
+        "memory_attachment",
     ] {
         if row.detail[key].is_null() && !saved.detail[key].is_null() {
             row.detail[key] = saved.detail[key].clone();
@@ -3852,6 +3935,7 @@ mod tests {
                 fork_origin: None,
                 confirming: None,
                 opening: None,
+                awaiting_input: Default::default(),
                 terminal: None,
                 schema_started: true,
                 recovered: vec![],
@@ -3935,6 +4019,7 @@ mod tests {
                     fork_origin: None,
                     confirming: None,
                     opening: None,
+                    awaiting_input: Default::default(),
                     terminal: None,
                     schema_started: true,
                     recovered: vec![],
@@ -4028,6 +4113,7 @@ mod tests {
                 fork_origin: None,
                 confirming: None,
                 opening: None,
+                awaiting_input: Default::default(),
                 terminal: None,
                 schema_started: true,
                 recovered: vec![],
@@ -4534,6 +4620,7 @@ mod tests {
                     fork_origin: None,
                     confirming: None,
                     opening: None,
+                    awaiting_input: Default::default(),
                     terminal: None,
                     schema_started: true,
                     recovered: vec![],
@@ -6818,6 +6905,7 @@ mod tests {
                 fork_origin: None,
                 confirming: None,
                 opening: None,
+                awaiting_input: Default::default(),
                 terminal: None,
                 schema_started: true,
                 recovered: vec![],

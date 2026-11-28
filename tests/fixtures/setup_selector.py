@@ -130,7 +130,6 @@ fi
         # closes the last writer before the first read, and macOS may then
         # discard what was printed.
         capture = bytearray()
-        deadline = time.monotonic() + 8
 
         def read(wait=.05):
             if not select.select([master], [], [], wait)[0]:
@@ -146,6 +145,9 @@ fi
             steps = [(prompt, choices)] if isinstance(choices, bytes) else choices or []
             previous = 0
             for marker, answer in steps:
+                # Each prompt proves progress. Separate setup steps can each
+                # wait for durable writes to the provider config and key file.
+                deadline = time.monotonic() + 8
                 while marker not in capture[previous:] and time.monotonic() < deadline:
                     if proc.poll() is not None:
                         drain()
@@ -156,6 +158,7 @@ fi
                 assert marker in capture[previous:], f"Missing prompt {marker!r}: {capture.decode(errors='replace')}"
                 previous = len(capture)
                 os.write(master, answer)
+            deadline = time.monotonic() + 8
             while proc.poll() is None and time.monotonic() < deadline:
                 read()
             assert proc.wait(timeout=2) == 0, capture.decode()

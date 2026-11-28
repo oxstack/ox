@@ -9,6 +9,7 @@ Get started
   ox                 First run: guided setup, then your client opens
   ox codex           Open Codex and pick a model
   ox claude          Open Claude Code and pick a model
+  ox opencode        Open stock OpenCode with your OX API models
   ox desktop [dir]   Open the project in OX Desktop
   ox host <action>   Install, inspect or uninstall the per-user session host
   ox help browser    Verify and watch a local app
@@ -30,12 +31,29 @@ More
   ox login chatgpt|claude              Sign in with a ChatGPT or Claude plan
   ox serve [--port PORT]               Share one gateway with desktop apps and devices
   ox update [--check]                  Install or check for the newest ox release
-  ox help [install|setup|settings|desktop|share|t3|subscriptions]
+  ox help [browser|install|setup|settings|desktop|share|t3|subscriptions|opencode]
   ox --version
 
 Providers live in codeox.toml in your Codex home; ox doctor prints the path.
 API sessions use a separate ox client profile, so your own Codex and Claude Code
 settings and history stay untouched.";
+
+const OPENCODE: &str = "\
+Usage: ox opencode [OpenCode arguments]
+
+Run stock OpenCode with the providers you configured in OX.
+
+  ox opencode                                              Open the terminal UI
+  ox opencode models                                       List OX model IDs
+  ox opencode run --model ox/provider/model-id \"Your task\"   Run a single task
+  ox opencode run --continue \"Continue from here\"           Resume the last session
+
+Install stock OpenCode 1.x from https://opencode.ai/download and put opencode
+on PATH. Tested with 1.19.6. Run ox setup to configure an API provider. Use the
+ox/ prefix shown by models. OpenCode stores these sessions in its OX profile.
+
+For scripted runs, add --format json to the run command.
+Run opencode --help for the stock command reference.";
 
 const DESKTOP: &str = "\
 OX Desktop
@@ -264,6 +282,7 @@ const HELP_TOPICS: &[&str] = &[
     "share",
     "t3",
     "subscriptions",
+    "opencode",
 ];
 const PS_USAGE: &str = "\
 Usage: ox ps [--json]
@@ -285,7 +304,7 @@ End sessions on the OX host. A thread stays resumable after it ends.
 A running session loses its current turn when it ends. ox ps lists the ids.";
 
 const TOPICS: &str =
-    "Usage: ox help [browser|install|setup|settings|desktop|share|t3|subscriptions]";
+    "Usage: ox help [browser|install|setup|settings|desktop|share|t3|subscriptions|opencode]";
 
 pub(crate) fn overview() {
     println!("{OVERVIEW}");
@@ -309,6 +328,7 @@ pub(crate) fn dispatch(args: &[OsString]) -> Option<Result<u8, RelayError>> {
             Some("share") => println!("{SHARE}"),
             Some("t3") => println!("{T3}"),
             Some("subscriptions") => println!("{SUBSCRIPTIONS}"),
+            Some("opencode") => println!("{OPENCODE}"),
             _ => {
                 let topic = topic.to_string_lossy();
                 let fix = crate::ui::closest(&topic, HELP_TOPICS.iter().copied())
@@ -329,6 +349,7 @@ pub(crate) fn dispatch(args: &[OsString]) -> Option<Result<u8, RelayError>> {
             Some("login") => println!("{SUBSCRIPTIONS}"),
             Some("ps") => println!("{PS_USAGE}"),
             Some("end") => println!("{END_USAGE}"),
+            Some("opencode") => println!("{OPENCODE}"),
             Some(client @ ("codex" | "claude")) => {
                 println!(
                     "Usage: ox {client} [client arguments]\n\

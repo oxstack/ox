@@ -14,6 +14,28 @@ pub struct MemoryConfig {
     pub brief_override: Option<String>,
 }
 
+/// The startup context sent with a first turn. Receipt metadata excludes memory text and ids.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Attachment {
+    pub entries: usize,
+    pub from_parent_host: bool,
+}
+
+impl Attachment {
+    pub fn label(&self) -> String {
+        let entries = if self.entries == 1 {
+            "1 pinned memory".to_owned()
+        } else {
+            format!("{} pinned memories", self.entries)
+        };
+        if self.from_parent_host {
+            format!("{entries} attached from the parent host")
+        } else {
+            format!("{entries} attached at session start")
+        }
+    }
+}
+
 /// Safe sensitivity ceiling for a resolved runtime/billing route.
 ///
 /// Defaults to `Private`. `OX_MEMORY_ALLOW_LOCAL_ONLY=1` allows `LocalOnly` on a

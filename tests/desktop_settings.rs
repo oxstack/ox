@@ -56,6 +56,43 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn provider_models_use_route_ownership_with_custom_aliases() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.0.join("codeox.toml"),
+        r#"[providers.aardvark]
+base_url = "http://127.0.0.1:9/v1"
+env_key = "OLD_KEY"
+discovery = false
+[[providers.aardvark.models]]
+id = "old"
+
+[providers.verified]
+base_url = "http://127.0.0.1:9/v1"
+env_key = "VERIFIED_KEY"
+discovery = false
+[[providers.verified.models]]
+id = "new"
+alias = "preferred-review"
+"#,
+    )
+    .unwrap();
+    let env = [("OLD_KEY", "fixture-old"), ("VERIFIED_KEY", "fixture-new")];
+    assert_eq!(
+        fixture
+            .request_using(json!({"action":"provider_models","id":"verified"}), &env)
+            .unwrap(),
+        json!(["preferred-review"])
+    );
+    assert_eq!(
+        fixture
+            .request_using(json!({"action":"provider_models","id":"aardvark"}), &env)
+            .unwrap(),
+        json!(["aardvark/old"])
+    );
+}
+
+#[test]
 fn first_run_and_connected_accounts_report_only_native_status() {
     let fixture = Fixture::new();
     let fresh = fixture.read();

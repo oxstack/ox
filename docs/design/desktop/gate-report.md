@@ -1,5 +1,20 @@
 # Linux workbench performance gate
 
+## Restored-thread launch
+
+Use the matching packaged GUI, host, and probe on the same desktop and renderer for each side of a comparison.
+
+```sh
+ox-desk-probe gate --app /path/to/ox-desktop --ox /path/to/ox \
+  --scenarios restore-thread --restore-samples 10 --out restore.json
+```
+
+Add `--wayland` on the private Sway test compositor. The seed thread is selected through the existing layout probe, which also works without a native keyboard driver on macOS.
+
+The probe opens and saves a synthetic Codex thread in each of two private profiles (30 threads with 20 history items, and 5,000 threads with 2,000 items). It then relaunches OX without a project argument, first with the same host running and then with the host stopped before each sample. The stopped-host launches start their own private host through the normal desktop path. The profile is seeded in both cases, and filesystem pages are left to the OS.
+
+The common monotonic clock starts before desktop process spawn. The marks record the first GPUI frame callback after the initial draw, the selected thread's composer built and allowed to take a message, the first transcript row painted inside the visible bounds, and the selected thread ready with verified history from the host. Results contain raw samples, medians and p90s. Missing marks fail the scenario. The marks can arrive in different orders, and the report leaves timing judgments to the comparison on that machine. Measure compositor presentation separately.
+
 ## Local session host measurements
 
 The host-aware release probe starts a fresh daemon before each cold launch. It samples the desktop, daemon and their runtime children independently. These November 24 ARM64 measurements used disposable homes on Oscar’s Snapdragon X Elite laptop. The stream fixtures drive the real desktop, host and protocol with repeatable synthetic input.

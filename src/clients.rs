@@ -294,6 +294,39 @@ fn relay_profile_root(home: &Path) -> Result<PathBuf, RelayError> {
     Ok(home.join("ox-clients"))
 }
 
+fn create_profile_dir(directory: &Path) -> Result<(), RelayError> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    if let Err(error) = builder.create(directory)
+        && error.kind() != std::io::ErrorKind::AlreadyExists
+    {
+        return Err(error.into());
+    }
+    if !std::fs::symlink_metadata(directory)?.is_dir() {
+        return Err("the ox client profile must be a directory and cannot be a symlink".into());
+    }
+    Ok(())
+}
+
+/// OpenCode uses four XDG roots. Its cache cleanup must have a separate tree
+/// from the persistent settings and session database.
+pub(crate) fn opencode_profile(home: &Path) -> Result<PathBuf, RelayError> {
+    let root = relay_profile_root(home)?;
+    let profile = root.join("opencode");
+    create_profile_dir(&root)?;
+    create_profile_dir(&profile)?;
+    for name in ["cache", "config", "data", "state"] {
+        let root = profile.join(name);
+        create_profile_dir(&root)?;
+        create_profile_dir(&root.join("opencode"))?;
+    }
+    Ok(profile)
+}
+
 pub(crate) fn codex_profiles(
     home: &Path,
 ) -> Result<crate::settings_protocol::CodexProfiles, RelayError> {
@@ -359,20 +392,7 @@ pub(crate) fn relay_client_home(
         require_separate_claude_profiles(native, &profile)?;
     }
     for directory in [&root, &profile] {
-        let mut builder = std::fs::DirBuilder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        if let Err(error) = builder.create(directory)
-            && error.kind() != std::io::ErrorKind::AlreadyExists
-        {
-            return Err(error.into());
-        }
-        if !std::fs::symlink_metadata(directory)?.is_dir() {
-            return Err("the ox client profile must be a directory and cannot be a symlink".into());
-        }
+        create_profile_dir(directory)?;
     }
     let _lock = crate::setup::lock_config(&profile)?;
     if files.iter().any(|file| profile.join(file).is_symlink()) {

@@ -285,6 +285,14 @@ jobs:
           python3 desktop/ci/quarantine.py gate-x11 -- xvfb-run -a -s '-screen 0 1280x900x24' desktop/target/release/ox-desk-probe gate \
             --app "$FIXTURE/ox-desktop/ox-desktop" --ox "$FIXTURE/ox-desktop/ox" \
             --scenarios G4,G6,G7,G8,G9,G10,G11,G12,reconnect,navigation,layout,remote-access --out "$RUNNER_TEMP/desktop-gate.json"
+      - name: Measure packaged restored-thread launch milestones
+        if: runner.os == 'Linux' && !cancelled() && steps.window-tests.outcome == 'success'
+        env:
+          FIXTURE: ${{ steps.window-tests.outputs.dir }}
+        run: |
+          xvfb-run -a -s '-screen 0 1280x900x24' desktop/target/release/ox-desk-probe gate \
+            --app "$FIXTURE/ox-desktop/ox-desktop" --ox "$FIXTURE/ox-desktop/ox" \
+            --scenarios restore-thread --restore-samples 1 --out "$RUNNER_TEMP/restore-thread.json"
       - name: Measure packaged Claude sessions on native Linux Wayland
         if: runner.os == 'Linux' && !cancelled() && steps.window-tests.outcome == 'success'
         env:
@@ -301,6 +309,8 @@ jobs:
           path: |
             ${{ runner.temp }}/desktop-gate.json
             ${{ runner.temp }}/desktop-gate.png
+            ${{ runner.temp }}/restore-thread.json
+            ${{ runner.temp }}/restore-thread.png
             ${{ runner.temp }}/mixed-runtime-window.png
             ${{ runner.temp }}/native-catalog-window.png
             ${{ runner.temp }}/claude-gate.json

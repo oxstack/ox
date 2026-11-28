@@ -403,11 +403,14 @@ impl Store {
                 if display == owner && is_user {
                     let process = self.claude_mut().sessions.get_mut(owner).unwrap();
                     process.events.awaiting_echo.retain(|(uuid, _)| uuid != &id);
-                    if let Some((_, notice)) =
-                        process.worker_notice.take_if(|(uuid, _)| uuid == &id)
-                    {
+                    let notice = process.worker_notice.take_if(|(uuid, _)| uuid == &id);
+                    let attachment = process.memory_attachment.take_if(|(uuid, _)| uuid == &id);
+                    if let Some((_, notice)) = notice {
                         self.worker_notice_receipts
                             .push(crate::store::WorkerNoticeReceipt::Accepted(notice));
+                    }
+                    if let Some((_, attachment)) = attachment {
+                        self.remember_memory_attachment(owner, attachment);
                     }
                 }
                 rebase_agents(owner, &display, &mut item, |child, tool, status| {
@@ -797,6 +800,13 @@ impl Store {
                     let notice = process
                         .worker_notice
                         .take_if(|(uuid, _)| cancelled.contains(uuid.as_str()));
+                    if process
+                        .memory_attachment
+                        .take_if(|(uuid, _)| cancelled.contains(uuid.as_str()))
+                        .is_some()
+                    {
+                        process.memory_brief_pending = true;
+                    }
                     let pending = &mut process.events.awaiting_echo;
                     let (mut cancelled, survivors): (Vec<_>, _) = std::mem::take(pending)
                         .into_iter()

@@ -105,9 +105,11 @@ class IssueTracker(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/issues":
             self.reply(200, "application/json", json.dumps(self.server.issues).encode())
-        elif self.path == "/external":
+        elif self.path in ("/external", "/dev-redirect"):
+            location = ("http://example.invalid/" if self.path == "/external" else
+                        f"http://ox-dev.localhost:{self.server.server_port}/")
             self.send_response(302)
-            self.send_header("Location", "http://example.invalid/")
+            self.send_header("Location", location)
             self.send_header("Content-Length", "0")
             self.end_headers()
         elif self.path == "/":
@@ -184,8 +186,10 @@ def verify(args, server, home):
     url = f"http://127.0.0.1:{server.server_port}"
     cache = home / "cache" / "ox" / "browser"
 
-    def run(*command, session=None, cwd=worktree, check=True):
+    def run(*command, session=None, allow_host=None, cwd=worktree, check=True):
         scope = [] if session is None else ["--session", session]
+        if allow_host is not None:
+            scope.extend(["--allow-host", allow_host])
         start = perf_counter()
         completed = subprocess.run(
             [args.ox, "browser", *scope, *command], cwd=cwd, env=env,
@@ -260,8 +264,30 @@ def verify(args, server, home):
         assert "Project issues" in run("snapshot", session="second")[1].stdout
         run("open", url)
         assert "Issue created." not in run("snapshot")[1].stdout
+
+        # Chromium resolves *.localhost to loopback without editing system DNS.
+        # The exact host still needs explicit opt-in in both OX and the daemon.
+        dev_host = "ox-dev.localhost"
+        dev_url = f"http://{dev_host}:{server.server_port}"
+        assert run("open", dev_url, check=False)[1].returncode
+        _, blocked = run("open", f"{url}/dev-redirect", check=False)
+        assert blocked.returncode and "blocked by the domain filter" in blocked.stderr, blocked
+        assert run("preview", allow_host=dev_host, check=False)[1].returncode == 3
+        run("open", f"{url}/dev-redirect", allow_host=dev_host)
+        _, trusted = run("snapshot", allow_host=dev_host)
+        assert "Project issues" in trusted.stdout
+        assert run("preview", allow_host=dev_host)[1].stdout != run("preview")[1].stdout
+        assert run("open", dev_url, allow_host="other.localhost", check=False)[1].returncode
+        _, redirected = run("open", f"{url}/external", allow_host=dev_host, check=False)
+        assert redirected.returncode and "blocked by the domain filter" in redirected.stderr, redirected
+        run("close", allow_host=dev_host)
+        assert run("preview", allow_host=dev_host, check=False)[1].returncode == 3
+        # The original scope is still running after the explicitly opted-in one closes.
+        run("open", url)
+        assert "Project issues" in run("snapshot")[1].stdout
     finally:
         run("close", check=False)
+        run("close", allow_host="ox-dev.localhost", check=False)
         run("close", session="second", check=False)
         run("close", cwd=other, check=False)
 
@@ -272,7 +298,7 @@ def verify(args, server, home):
         "warm_click_median_ms": round(median(click_times), 2),
         **memory,
         "checked": ["validation and repair", "server save", "worktree and session isolation",
-                    "live preview", "screenshot", "URL scope", "close and reopen"],
+                    "live preview", "screenshot", "URL scope", "trusted host override", "close and reopen"],
     }, indent=2))
 
 

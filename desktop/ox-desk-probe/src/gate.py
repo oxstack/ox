@@ -8,6 +8,7 @@ import signal
 import shlex
 import shutil
 import socket
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -26,9 +27,12 @@ parser.add_argument("--probe-commit", default="", help=argparse.SUPPRESS)
 parser.add_argument("--limits-toml", help=argparse.SUPPRESS)
 parser.add_argument("--wayland", action="store_true", help="use a private Sway compositor")
 parser.add_argument("--scenarios", default="G1,G2,G3,G4,G5,G6,G7,G8,G9,G10,G11,G12")
+parser.add_argument("--restore-samples", type=int, default=10, help="launches per restored-thread case")
 parser.add_argument("--probe", type=Path, required=True)
 parser.add_argument("--mac-key-driver", type=Path, help="native macOS shortcut driver for G14")
 args = parser.parse_args()
+if args.restore_samples < 1:
+    parser.error("--restore-samples must be at least 1")
 limits = (tomllib.loads(args.limits_toml) if args.limits_toml else
           tomllib.loads((Path(__file__).resolve().parents[2] / "gate.toml").read_text()))["linux"]
 probe = args.probe.resolve()
@@ -419,10 +423,16 @@ if len(sys.argv) == 2 and "Tailscale" in sys.argv[1]:
         desktop["children"] += daemon["children"]
         return desktop
 
-    def stop(self):
+    def stop_app(self):
         if self.proc and self.proc.poll() is None:
             self.proc.terminate()
             self.proc.wait(timeout=8)
+        if self.proc and self.proc.stdout:
+            self.proc.stdout.close()
+        self.proc = None
+
+    def stop(self):
+        self.stop_app()
         if self.host is not None:
             self.host.__exit__(None, None, None)
             self.host = self.host_process = None
@@ -854,6 +864,93 @@ def saved_layout(f):
            selected_thread_restored=True, independent_projects_restored=True)
 
 
+RESTORE_MARKS = ("first_frame_callback", "composer_ready", "transcript_visible", "thread_live")
+
+
+def restored_launch(f, env, logfile):
+    started = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    with logfile.open("w") as output:
+        # No project argument and no stats flag. Exercise the normal startup
+        # path from saved state. The child timestamps the milestones itself.
+        f.proc = subprocess.Popen([f.app], cwd=f.project, env=env, stdout=output, stderr=f.log)
+
+        def milestones():
+            marks = {}
+            for line in logfile.read_text().splitlines(keepends=True):
+                if line.startswith("desk-restore ") and line.endswith("\n"):
+                    _, key, ns = line.split()
+                    marks[key] = int(ns)
+            if all(key in marks for key in RESTORE_MARKS):
+                assert all(marks[key] >= started for key in RESTORE_MARKS), marks
+                return {key: (marks[key] - started) / 1e6 for key in RESTORE_MARKS}
+            if f.proc.poll() is not None:
+                raise RuntimeError(f"Desktop exited before restored-thread milestones: {marks}")
+            return None
+
+        try:
+            return wait(milestones, timeout=20)
+        except TimeoutError as error:
+            raise RuntimeError(f"Missing restored-thread milestones:\n{logfile.read_text()}") from error
+        finally:
+            f.stop_app()
+
+
+def restored_thread(f):
+    target = "desk-0000"
+    cases = {}
+    for size, threads, items in (("small", 30, 20), ("large", 5000, 2000)):
+        f.start(threads, items, routes=True)
+        f.wait_for("the seed thread to appear in the sidebar", lambda: f.control("Thread 0000"))
+        f.press("Thread 0000")
+        f.wait_for("the seeded history", lambda: f.stats()["selected_thread"] == target
+                   and f.stats()["tail_ns"] > 0)
+        layout = Path(f.env["XDG_STATE_HOME"]) / "ox/desktop/layout.json"
+        f.wait_for("the selected thread to be saved", lambda: layout.exists() and target in layout.read_text())
+
+        f.stop_app()
+        env = {**f.env, "OX_DESK_RESTORE_PROBE_THREAD": target}
+        env.pop("OX_DESK_STATS_SOCKET")
+        if sys.platform == "darwin":
+            # Keep the stopped-host launch independent of the logged-in user's
+            # LaunchAgent while retaining the fixture's saved workspace.
+            env["HOME"] = env["XDG_DATA_HOME"]
+            Path(env["HOME"]).mkdir(mode=0o700, exist_ok=True)
+
+        for mode in ("warm", "stopped"):
+            if mode == "stopped":
+                f.stop()
+                env["OX_HOST_SOCKET"] = str(Path(f.env["OX_DESK_SYNTH_TRACE"]).with_name("restore-host.sock"))
+            samples = []
+            logfile = f.root / f"restore-{size}-{mode}.log"
+            for sample in range(args.restore_samples):
+                if mode == "warm" and f.host_process.poll() is not None:
+                    raise RuntimeError("The warm fixture host exited before a measured launch")
+                if mode == "stopped":
+                    # The synthetic runtime's control socket is a fixture-only
+                    # path. Its previous process may leave the pathname on exit.
+                    env["OX_DESK_SYNTH_CONTROL"] = str(f.root / f"restore-{size}-{sample}.sock")
+                try:
+                    samples.append(restored_launch(f, env, logfile))
+                finally:
+                    if mode == "stopped":
+                        subprocess.run([f.host_binary, "stop"], env=env, check=True,
+                                       stdout=f.log, stderr=f.log, timeout=18)
+            if mode == "warm" and f.host_process.poll() is not None:
+                raise RuntimeError("The warm fixture host exited during the measured launches")
+            def percentile90(values):
+                return sorted(values)[(9 * len(values) + 9) // 10 - 1]
+            cases[f"{size}_{mode}"] = {
+                "catalog_threads": threads,
+                "history_items": items,
+                "samples_ms": samples,
+                "median_ms": {key: statistics.median(s[key] for s in samples) for key in RESTORE_MARKS},
+                "p90_ms": {key: percentile90([s[key] for s in samples]) for key in RESTORE_MARKS},
+            }
+    record("restore-thread", True, filesystem_cache="seeded profile, unmanaged page cache",
+           machine=f"{os.uname().machine} {os.uname().sysname} {os.uname().release}",
+           cpu_count=os.cpu_count(), fixture_sha256=sha256(fake), cases=cases)
+
+
 def remote_access(f):
     # The GUI talks to the real packaged host and a private synthetic Serve CLI.
     # Every domain and identity here is local test data.
@@ -1148,6 +1245,8 @@ def run():
             if "layout" in selected:
                 f.stop()
                 saved_layout(f)
+            if "restore-thread" in selected:
+                restored_thread(f)
             if "G12" in selected:
                 f.stop()
                 f.start(30, 1, real_settings=True)

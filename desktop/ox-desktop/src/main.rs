@@ -29,6 +29,7 @@ fn main() {
 }
 
 fn run(args: impl Iterator<Item = std::ffi::OsString>) {
+    platform::restore_probe::init();
     platform::init_companion();
     let _package = ox_host_service::managed_install::hold_generation();
     ox_host_service::configure_allocator();

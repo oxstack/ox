@@ -76,6 +76,11 @@ ox setup
 ox codex      # or: ox claude
 ```
 
+With stock [OpenCode](https://opencode.ai/download) on PATH, run `ox opencode`
+to use the same OX API providers from OpenCode's terminal interface. Run
+`ox opencode models` for the model IDs accepted by OpenCode and
+`ox help opencode` for interactive and scripted examples.
+
 [CLI guide](docs/relay.md)
 
 ## Upgrade

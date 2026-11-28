@@ -129,6 +129,20 @@ The host fixture exercises a Claude Code plan handoff, mode selection, permissio
 python3 desktop/tests/host_antigravity_session.py /path/to/ox-host /path/to/ox /path/to/agy
 ```
 
+### Standalone OpenCode
+
+With stock OpenCode 1.19.6 installed, run the local provider fixture against
+the candidate OX binary:
+
+```sh
+cargo build --locked --bin ox
+python3 tests/fixtures/stock_opencode.py target/debug/ox "$(command -v opencode)"
+```
+
+The fixture checks model listing, streamed Messages, Responses and Chat
+Completions, a stock read tool call, resume, and interrupt. It uses a temporary
+project and separate XDG roots. No live vendor account is required.
+
 ## Client updates
 
 ox launches the `codex` or `claude` executable on `PATH` with its launch-scoped

@@ -2,8 +2,8 @@
 //! Composer first: the ox, the greeting and the project, then the composer itself.
 use super::Workbench;
 use crate::appearance::{Palette, Step};
-use crate::kit::{SPACE_L, col};
-use gpui::*;
+use crate::kit::{SPACE_L, button, col, row};
+use gpui::{prelude::FluentBuilder, *};
 use ox_desk_core::runtime::Billing;
 
 /// Ask the host to open its folder picker, so a user with no thread can open a project.
@@ -21,7 +21,7 @@ impl Workbench {
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| self.project.display().to_string());
         let billing = match &self.route.billing {
-            Billing::Subscription => format!("{} subscription", self.route.runtime.account()),
+            Billing::Subscription => self.route.label(),
             Billing::Api(alias) => format!("API · {alias}"),
         };
         let host = self
@@ -33,6 +33,11 @@ impl Workbench {
             self.route.runtime.name()
         );
         let frame = self.mascot_frame;
+        let offer_setup = self.store.as_ref().is_some_and(|store| {
+            store.state() == &ox_desk_core::store::Connection::Ready
+                && store.selected().is_none()
+                && store.draft(None).trim().is_empty()
+        });
         col()
             .flex_1()
             .min_h_0()
@@ -71,6 +76,21 @@ impl Workbench {
                     .child(connection),
             )
             .child(div().mt(px(24.)).w_full().child(dock))
+            .when(offer_setup, |view| {
+                view.child(row().mt_2().child(button(
+                    p, "project-setup-starter", "Get project setup help", false, true,
+                    cx.listener(|s, _, _, cx| {
+                        if let Some(store) = s.store.as_mut()
+                            && store.selected().is_none()
+                            && store.draft(None).trim().is_empty()
+                        {
+                            store.edit(None, "Help me set up this project. Read its setup instructions, check the prerequisites, and explain the next steps. Ask before changing my machine or installing anything.".into());
+                            s.focus_editor_for = Some(None);
+                            cx.notify();
+                        }
+                    }),
+                )))
+            })
             .child(
                 div()
                     .mt(px(12.))

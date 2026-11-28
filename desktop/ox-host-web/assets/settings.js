@@ -151,7 +151,34 @@ function fields(parent, specs, base = {}, isNew = false) {
   return { inputs, changes };
 }
 
-export function setupSettings({ request, open, close, pushStatus, enablePush, login }) {
+function registeredHostOrigin(value) {
+  try {
+    const url = new URL(value);
+    if (
+      url.protocol === "https:" &&
+      url.hostname.endsWith(".ts.net") &&
+      url.origin === value &&
+      url.origin !== location.origin
+    )
+      return url;
+  } catch {}
+  return null;
+}
+
+const knownHostsKey = "ox-phone-known-hosts-v1";
+export function forgetKnownHosts() {
+  try { localStorage.removeItem(knownHostsKey); } catch {}
+}
+function knownHostAddresses() {
+  try {
+    const hosts = JSON.parse(localStorage.getItem(knownHostsKey) || "[]");
+    return hosts.filter((host) => typeof host.name === "string" && registeredHostOrigin(host.origin));
+  } catch {
+    return [];
+  }
+}
+
+export function setupSettings({ request, open, close, pushStatus, enablePush, login, hostName }) {
   const panel = node("section");
   panel.id = "settings";
   panel.hidden = true;
@@ -242,7 +269,7 @@ export function setupSettings({ request, open, close, pushStatus, enablePush, lo
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) refreshPushPermission?.();
   });
-  function screen(title, back = menu) {
+  function screen(title, back = menu, backLabel) {
     pageId++;
     refreshPushPermission = null;
     clearTimeout(inviteTimer);
@@ -254,7 +281,7 @@ export function setupSettings({ request, open, close, pushStatus, enablePush, lo
     heading.tabIndex = -1;
     panel.replaceChildren(
       button(
-        back === close
+        backLabel ?? (back === close
           ? "← Sessions"
           : back === remote
             ? "← Remote access"
@@ -264,7 +291,7 @@ export function setupSettings({ request, open, close, pushStatus, enablePush, lo
               ? "← Destinations"
             : back === providers
             ? "← Providers"
-            : "← Settings",
+              : "← Settings"),
         back,
         "back",
       ),
@@ -1213,8 +1240,57 @@ export function setupSettings({ request, open, close, pushStatus, enablePush, lo
     }
     show(initial);
   }
-  async function workerLinks() {
-    const id = screen("Worker host links", remote);
+  async function hosts(back = close, backLabel) {
+    const show = () => hosts(back, backLabel);
+    const id = screen("Hosts", back, backLabel);
+    const current = node("div", undefined, "phone-settings-card");
+    current.append(node("h2", hostName()), node("p", "Current host"));
+    body.append(current);
+    status.textContent = "Loading linked hosts…";
+    let peers;
+    let offline = false;
+    try {
+      const links = await request({ action: "worker_links" });
+      if (id !== pageId || panel.hidden) return;
+      peers = [
+        ...(links.hosts || []).map((host) => [host, "Linked for workers"]),
+        ...(links.available || []).map((host) => [host, "Worker link not enabled"]),
+      ];
+      try {
+        localStorage.setItem(knownHostsKey, JSON.stringify(peers
+          .map(([{ name, origin }]) => ({ name, origin }))
+          .filter((host) => registeredHostOrigin(host.origin))));
+      } catch {}
+    } catch (error) {
+      offline = true;
+      if (error.status === 403) forgetKnownHosts();
+      peers = knownHostAddresses().map((host) => [host, "Saved address"]);
+    }
+    if (id !== pageId || panel.hidden) return;
+    status.textContent = offline ? "Couldn’t refresh the host list." : "";
+    if (peers.length) body.append(node("p", "Open another host to view its sessions. Pair this phone there if asked."));
+    else if (!offline) body.append(node("p", "No worker destinations are linked."));
+    for (const [host, state] of peers) {
+      const card = node("div", undefined, "phone-settings-card");
+      card.append(node("h2", host.name), node("p", state));
+      const origin = registeredHostOrigin(host.origin);
+      if (origin) {
+        const address = node("p", origin.host, "phone-settings-host-address");
+        const link = node("a", `Open ${host.name}`, "phone-settings-host-open");
+        link.href = origin.href;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        card.append(address, link);
+      }
+      body.append(card);
+    }
+    body.append(offline
+      ? action("Retry host list", show, "quiet")
+      : action("Manage worker hosts", () => workerLinks(show, "← Hosts")));
+  }
+  async function workerLinks(back = remote, backLabel) {
+    const show = () => workerLinks(back, backLabel);
+    const id = screen("Worker host links", back, backLabel);
     const outbound = await readPage(id, {action: "worker_links"});
     if (!outbound) return;
     const form = node("form", undefined, "phone-settings-card");
@@ -1223,7 +1299,7 @@ export function setupSettings({ request, open, close, pushStatus, enablePush, lo
     for (const host of outbound.available || []) {
       form.append(action("Link " + host.name, async () => {
         await request({action: "link_paired_host", host: host.id});
-        if (pageId === id && !panel.hidden) await workerLinks();
+        if (pageId === id && !panel.hidden) await show();
       }));
     }
     const address = textField(form, "Worker invitation or host URL", "worker_address");
@@ -1234,7 +1310,7 @@ export function setupSettings({ request, open, close, pushStatus, enablePush, lo
     submit(form, "Link worker host", async () => {
       await request({action: "add_worker_link", address: address.value.trim(), code: code.value.trim()});
       address.value = code.value = "";
-      if (pageId === id && !panel.hidden) await workerLinks();
+      if (pageId === id && !panel.hidden) await show();
     });
     body.append(form);
     const waiting = node("div", undefined, "phone-settings-card");
@@ -1256,7 +1332,7 @@ export function setupSettings({ request, open, close, pushStatus, enablePush, lo
           waiting.append(
             action(`${host.name} · ${host.origin}`, async () => {
               await request({ action: "add_worker_link_window", origin: host.origin });
-              if (pageId === id && !panel.hidden) await workerLinks();
+              if (pageId === id && !panel.hidden) await show();
             }, "primary"),
           );
         }
@@ -1268,7 +1344,7 @@ export function setupSettings({ request, open, close, pushStatus, enablePush, lo
       card.append(node("h2", host.name), node("p", host.origin), action("Remove outgoing link", async () => {
         const result = await request({action: "remove_worker_link", host: host.id});
         if (pageId !== id || panel.hidden) return;
-        await workerLinks();
+        await show();
         if (!result.revoked) status.textContent = "Removed here. Revoke the incoming link on the other host when it is reachable.";
       }));
       body.append(card);
@@ -1299,11 +1375,11 @@ export function setupSettings({ request, open, close, pushStatus, enablePush, lo
       card.append(allowed, limit, synced);
       submit(card, "Save worker access", async () => {
         await request({action: "edit_worker_link", id: device.id, before: device.worker, may_launch: allow.checked, ceiling: ceiling.value, may_sync_memory: sync.checked});
-        if (pageId === id && !panel.hidden) { await workerLinks(); status.textContent = "Saved on this host."; }
+        if (pageId === id && !panel.hidden) { await show(); status.textContent = "Saved on this host."; }
       });
       body.append(card, action("Revoke " + device.label, async () => {
         await request({action: "revoke_device", id: device.id});
-        if (pageId === id && !panel.hidden) await workerLinks();
+        if (pageId === id && !panel.hidden) await show();
       }));
     }
   }
@@ -1755,6 +1831,10 @@ export function setupSettings({ request, open, close, pushStatus, enablePush, lo
     openNotifications() {
       open();
       return notificationPreferences(close);
+    },
+    openHosts(back, backLabel) {
+      open();
+      return hosts(back, backLabel);
     },
     reset() {
       pageId++;

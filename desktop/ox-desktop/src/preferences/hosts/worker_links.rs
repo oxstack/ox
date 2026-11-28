@@ -45,6 +45,15 @@ fn directory(host: Option<&SavedHost>) -> io::Result<Directory> {
 }
 
 impl Hosts {
+    pub(in crate::preferences) fn open_worker_links(
+        &mut self,
+        source: Option<SavedHost>,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected = source;
+        self.link_action(Action::WorkerLinks, cx);
+    }
+
     fn link_action(&mut self, command: Action, cx: &mut Context<Self>) {
         let selected = self.selected.clone();
         self.work(cx, move || {
@@ -115,32 +124,42 @@ impl Hosts {
             return section.child(button(
                 p,
                 "worker-links",
-                "Worker host links…",
+                "Manage worker hosts…",
                 false,
                 !self.busy,
                 cx.listener(|s, _, _, cx| s.link_action(Action::WorkerLinks, cx)),
             ));
         };
-        section = section.child("Worker host links").child(
+        let source = self
+            .selected
+            .as_ref()
+            .map_or("this computer", |host| host.name.as_str());
+        section = section.child(format!("Send workers from {source}")).child(
             "New links allow launches up to YOLO, subject to the receiving host’s mode policy.",
         );
         for (i, host) in links.available.iter().enumerate() {
             let id = host.id.clone();
-            section = section.child(button(
-                p,
-                ("worker-pair-known", i),
-                format!("Link {}", host.name),
-                false,
-                !self.busy,
-                cx.listener(move |s, _, _, cx| {
-                    s.link_action(Action::LinkPairedHost { host: id.clone() }, cx)
-                }),
-            ));
+            section = section.child(
+                button(
+                    p,
+                    ("worker-pair-known", i),
+                    format!("Allow workers on {}", host.name),
+                    false,
+                    !self.busy,
+                    cx.listener(move |s, _, _, cx| {
+                        s.link_action(Action::LinkPairedHost { host: id.clone() }, cx)
+                    }),
+                )
+                .tooltip(host.origin.clone()),
+            );
         }
         for (i, host) in links.hosts.iter().enumerate() {
             let id = host.id.clone();
             section = section
-                .child(format!("{} · {}", host.name, host.origin))
+                .child(format!(
+                    "{} · Linked for workers · {}",
+                    host.name, host.origin
+                ))
                 .child(button(
                     p,
                     ("worker-remove-outgoing", i),
@@ -158,7 +177,7 @@ impl Hosts {
             .child(button(
                 p,
                 "worker-pair",
-                "Link worker host",
+                "Link by invitation or address",
                 false,
                 !self.busy,
                 cx.listener(|s, _, w, cx| {

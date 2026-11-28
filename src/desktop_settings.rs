@@ -111,9 +111,17 @@ async fn handle(home: &Path, request: Request) -> Result<Value, RelayError> {
             .map_err(|_| "Invalid previous desktop workspace")?;
             Ok(serde_json::to_value(layout)?)
         }
-        Request::Models => {
+        request @ (Request::Models | Request::ProviderModels { .. }) => {
+            let provider = match &request {
+                Request::ProviderModels { id } => Some(id.as_str()),
+                _ => None,
+            };
             if !home.join(REGISTRY).try_exists()? {
-                return legacy::models(home).await;
+                return if provider.is_none() {
+                    legacy::models(home).await
+                } else {
+                    Ok(json!([]))
+                };
             }
             let config = CodeoxConfig::load(&home.join(REGISTRY))?;
             let keys = SavedKeys::for_config(home, &config)?;
@@ -131,6 +139,7 @@ async fn handle(home: &Path, request: Request) -> Result<Value, RelayError> {
             let mut models: Vec<_> = app
                 .launch_models()
                 .into_iter()
+                .filter(|(_, owner)| provider.is_none_or(|provider| *owner == provider))
                 .map(|(alias, _)| alias.to_string())
                 .collect();
             prioritize(&mut models, home);

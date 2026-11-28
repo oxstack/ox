@@ -93,6 +93,7 @@ fn edit_distance(left: &str, right: &str) -> usize {
 pub(crate) fn install_command(client: &str) -> &'static str {
     match client {
         "claude" => "curl -fsSL https://claude.ai/install.sh | bash",
+        "opencode" => "npm install -g opencode-ai@latest",
         _ if cfg!(target_os = "macos") => "brew install --cask codex",
         _ => "npm install -g @openai/codex",
     }
@@ -100,10 +101,10 @@ pub(crate) fn install_command(client: &str) -> &'static str {
 
 /// Display name for a stock client binary.
 pub(crate) fn client_name(client: &str) -> &'static str {
-    if client == "claude" {
-        "Claude Code"
-    } else {
-        "Codex"
+    match client {
+        "claude" => "Claude Code",
+        "opencode" => "OpenCode",
+        _ => "Codex",
     }
 }
 

@@ -400,5 +400,6 @@ mod tests {
 
 pub mod layout_probe;
 pub mod probe;
+pub mod restore_probe;
 #[cfg(target_os = "linux")]
 pub mod theme;

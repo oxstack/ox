@@ -388,6 +388,9 @@ impl Render for Hosts {
                 cx.listener(move |s, _, _, cx| s.select(Some(host.clone()), cx)),
             ));
         }
+        if self.selected.is_some() || !cx.global::<crate::app::ClientOnly>().0 {
+            list = list.child(self.worker_controls(p, cx));
+        }
         if let Some(host) = self.selected.clone() {
             let revoke = host.clone();
             let forget = host.clone();
@@ -571,9 +574,6 @@ impl Render for Hosts {
                     cx.listener(|s, _, _, cx| s.edit_policy(None, cx)),
                 ));
             }
-        }
-        if self.selected.is_some() || !cx.global::<crate::app::ClientOnly>().0 {
-            list = list.child(self.worker_controls(p, cx));
         }
         if let Some(status) = &self.status {
             list = list.child(format!("OX {} · {}", status.installed, status.message));

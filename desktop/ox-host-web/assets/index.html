@@ -83,6 +83,7 @@
           <details class="action-menu">
             <summary aria-label="More session list actions">•••</summary>
             <div>
+              <button type="button" id="open-hosts">Hosts</button>
               <button type="button" id="open-running">Manage processes</button>
               <button type="button" id="open-notifications">Notifications</button>
               <button type="button" id="operator-home">Host terminal</button>
@@ -179,9 +180,8 @@
                 <button type="button" id="menu-stop" hidden>Stop</button>
                 <div id="thread-actions" class="menu-items"></div>
               </section>
-              <section id="menu-workers" class="menu-section" aria-label="Workers and handoff" hidden>
-                <p class="menu-heading">Workers and handoff</p>
-                <button type="button" id="start-worker" hidden>Start worker</button>
+              <section id="menu-workers" class="menu-section" aria-label="Handoff" hidden>
+                <p class="menu-heading">Handoff</p>
                 <button type="button" id="continue-in" hidden>Continue in…</button>
               </section>
               <section class="menu-section" aria-label="Settings and terminal">
@@ -198,6 +198,16 @@
         <h1 id="title"></h1>
         <div id="confirm-slot" class="confirm-slot" hidden></div>
         <div id="handoff-marks" class="handoff-marks" hidden></div>
+        <details id="worker-results" class="worker-results" hidden>
+          <summary id="worker-results-title">Workers</summary>
+          <div id="worker-results-list"></div>
+        </details>
+        <button id="project-setup-starter" class="quiet" type="button" hidden>
+          Get project setup help
+        </button>
+        <button id="worker-review-starter" class="quiet" type="button" hidden>
+          Ask for a second opinion
+        </button>
         <button id="older" class="quiet" hidden>Load earlier messages</button
         >
         <div id="session-controls" hidden>
@@ -215,6 +225,7 @@
             >
               Session settings
             </button>
+            <button type="button" id="start-worker" class="quiet" aria-controls="worker-sheet" aria-haspopup="dialog" hidden>Start worker</button>
           </div>
           <section id="session-settings" hidden aria-label="Session settings">
             <form id="permissions-form">
@@ -251,58 +262,64 @@
           <summary>Changes &amp; plan</summary>
           <div id="review-content"></div>
         </details>
-        <form id="worker-form" class="sheet" hidden aria-label="Start worker">
-          <h2 class="sheet-title">Start worker</h2>
-          <div id="worker-placement" hidden>
-            <label for="worker-host">Worker host</label>
-            <select id="worker-host"><option value="parent">Same as parent</option></select>
-            <fieldset id="worker-needs" hidden disabled>
-              <legend>Hardware requirements</legend>
-              <label>Memory (GB)<input id="worker-memory" type="number" min="1" step="1" placeholder="Any" /></label>
-              <label>CPUs<input id="worker-cpus" type="number" min="1" step="1" placeholder="Any" /></label>
-              <label>OS<input id="worker-os" placeholder="Any" /></label>
-              <label><input id="worker-gpu" type="checkbox" /> Require GPU</label>
-            </fieldset>
-            <p class="note" id="worker-inventory-note"></p>
+        <dialog id="worker-sheet" aria-labelledby="worker-heading">
+        <form id="worker-form" class="sheet" hidden>
+          <div class="worker-sheet-body">
+            <h2 class="sheet-title" id="worker-heading" tabindex="-1">Start worker</h2>
+            <div id="worker-placement" hidden>
+              <label for="worker-host">Run on</label>
+              <select id="worker-host" aria-describedby="worker-inventory-note"><option value="parent">This host</option></select>
+              <fieldset id="worker-needs" hidden disabled>
+                <legend>Hardware requirements</legend>
+                <label>Memory (GB)<input id="worker-memory" type="number" min="1" step="1" placeholder="Any" /></label>
+                <label>CPUs<input id="worker-cpus" type="number" min="1" step="1" placeholder="Any" /></label>
+                <label>OS<input id="worker-os" placeholder="Any" /></label>
+                <label><input id="worker-gpu" type="checkbox" /> Require GPU</label>
+              </fieldset>
+              <p class="note" id="worker-inventory-note" role="status"></p>
+              <button type="button" id="worker-open-hosts" class="quiet">Manage worker hosts</button>
+            </div>
+            <label for="worker-task">Task</label>
+            <textarea id="worker-task" rows="3" required></textarea>
+            <label for="worker-runtime">Runtime</label>
+            <select id="worker-runtime">
+              <option value="codex">Codex</option>
+              <option value="claude">Claude Code</option>
+            </select>
+            <label for="worker-model">Model</label>
+            <select id="worker-model"></select>
+            <input
+              id="worker-model-free"
+              hidden
+              aria-label="Model alias"
+              placeholder="provider/model"
+              autocomplete="off"
+              autocapitalize="off"
+              spellcheck="false"
+            />
+            <div id="worker-subscription-limits" class="note" hidden></div>
+            <p class="field-label" id="worker-mode-label">Mode</p>
+            <div id="worker-mode-group" class="segmented" role="radiogroup" aria-labelledby="worker-mode-label"></div>
+            <p id="worker-mode-note" class="note"></p>
+            <input type="hidden" id="worker-mode" value="session" />
+            <label for="worker-permission">Permission mode</label>
+            <select id="worker-permission">
+              <option value="inherit">Inherit this session's mode</option>
+              <option value="read">Read only</option>
+              <option value="write">Workspace</option>
+              <option value="classifier">Auto-review</option>
+              <option value="yolo">YOLO</option>
+            </select>
+            <p id="worker-permission-note" class="note"></p>
+            <p id="worker-warning" class="warning-line" hidden></p>
           </div>
-          <label for="worker-runtime">Runtime</label>
-          <select id="worker-runtime">
-            <option value="codex">Codex</option>
-            <option value="claude">Claude Code</option>
-          </select>
-          <label for="worker-model">Model</label>
-          <select id="worker-model"></select>
-          <input
-            id="worker-model-free"
-            hidden
-            aria-label="Model alias"
-            placeholder="provider/model"
-            autocomplete="off"
-            autocapitalize="off"
-            spellcheck="false"
-          />
-          <div id="worker-subscription-limits" class="note" hidden></div>
-          <p class="field-label" id="worker-mode-label">Mode</p>
-          <div id="worker-mode-group" class="segmented" role="radiogroup" aria-labelledby="worker-mode-label"></div>
-          <p id="worker-mode-note" class="note"></p>
-          <input type="hidden" id="worker-mode" value="session" />
-          <label for="worker-permission">Permission mode</label>
-          <select id="worker-permission">
-            <option value="inherit">Inherit this session's mode</option>
-            <option value="read">Read only</option>
-            <option value="write">Workspace</option>
-            <option value="classifier">Auto-review</option>
-            <option value="yolo">YOLO</option>
-          </select>
-          <p id="worker-permission-note" class="note"></p>
-          <p id="worker-warning" class="warning-line" hidden></p>
-          <label for="worker-task">Task</label>
-          <textarea id="worker-task" rows="3" required></textarea>
-          <div class="actions">
+          <p id="worker-message" class="warning-line" role="status" hidden></p>
+          <div class="actions worker-sheet-actions">
             <button type="button" id="worker-cancel" class="quiet">Cancel</button
             ><button class="primary" id="worker-submit">Start worker</button>
           </div>
         </form>
+        </dialog>
         <form id="handoff-form" class="sheet" hidden aria-label="Continue in another runtime">
           <h2 class="sheet-title">Continue in another runtime</h2>
           <label for="handoff-runtime">Runtime</label>

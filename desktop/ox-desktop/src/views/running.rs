@@ -1,5 +1,5 @@
 //! The live sessions the session host runs, behind the sidebar footer's one
-//! "● N running" toggle: per-row End (on hover or focus) and an "End all idle" action.
+//! "N open" toggle: per-row End (on hover or focus) and an "End all idle" action.
 //! It polls the host while the sidebar shows it, and again right after every End.
 use crate::appearance::Step;
 use crate::{
@@ -126,7 +126,7 @@ impl Running {
             ..Self::default()
         }
     }
-    /// The one count for the footer's "● n running": every live host process, busy or idle.
+    /// The one count for the footer's "n open": every live host process, busy or idle.
     pub fn process_count(&self) -> usize {
         self.processes.len()
     }
@@ -507,7 +507,7 @@ impl Render for Running {
                 c.child(small(
                     p,
                     if self.loaded {
-                        "No live sessions"
+                        "No open sessions"
                     } else {
                         "Checking the session host…"
                     },

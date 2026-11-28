@@ -204,12 +204,14 @@ class Host(socketserver.StreamRequestHandler):
                             "routes": [f.scope["route"], f.antigravity_scope["route"]],
                             "projects": [f.scope["project"]],
                             "capabilities": ["snapshot", "resume", "actions", "worker_placement"],
+                            "host": {"id":f.host_id, "name":"Laptop", "version":"fixture", "epoch":"fixture"},
                         }
                     )
                 elif frame["type"] == "worker_hosts":
                     assert frame["project"] == f.scope["project"]
                     send({"type":"worker_reply","id":frame["id"],"result":{"hosts":[
-                        {"host":{"id":"laptop","name":"laptop"},"status":"online","parent_host":True,"routes":[f.scope["route"]]},
+                        {"host":{"id":f.host_id,"name":"Laptop"},"status":"online","parent_host":True,"routes":[f.scope["route"]]},
+                        {"host":{"id":"studio","name":"Studio"},"status":"unavailable","parent_host":False},
                         {"host":{"id":"build-id","name":"Build","subscription_limits":{"claude":[
                             {"label":"five hour","used_percent":72,"status":"allowed","observed_at":1700000000,"resets_at":None},
                             {"label":"old week","used_percent":99,"status":"allowed warning","observed_at":1,"resets_at":2}]},
@@ -880,6 +882,8 @@ def run(harness, screenshot=None):
         d = Path(tmp)
         host = socketserver.ThreadingUnixStreamServer(str(d / "mock-host.sock"), Host)
         host.daemon_threads = True
+        host.host_id = "06f2bbe4-12bb-4243-ab20-657f19c02d36"
+        (d / "host-id").write_text(host.host_id + "\n")
         host.scope = {
             "project": str(d / "fixture"),
             "route": {"runtime": "claude", "billing": "subscription"},
@@ -1154,9 +1158,26 @@ def run(harness, screenshot=None):
         keypress("\ue00c")
         assert js("return !document.querySelector('#conversation .action-menu').open && document.activeElement.matches('.action-menu > summary')")
         keypress("\ue004")
+        assert js("""return document.activeElement.id==='worker-results-title' &&
+            document.activeElement.textContent==='Workers (1)'""")
+        keypress("\ue007")
+        assert js("""return document.getElementById('worker-results').open &&
+            document.getElementById('worker-results-list').innerText.includes('Investigate connection pool')""")
+        keypress("\ue007")  # Collapse the list before moving to the session controls.
+        keypress("\ue004")
         assert js("return document.activeElement.id==='access-mode' && document.activeElement.matches(':focus-visible')")
         keypress("\ue004")
         assert js("return document.activeElement.id==='open-settings'")
+        keypress("\ue004")
+        assert js("return document.activeElement.id==='start-worker' && document.activeElement.matches(':focus-visible')")
+        keypress("\ue007")
+        assert js("return document.getElementById('worker-sheet').open && document.activeElement.id==='worker-heading'")
+        js("document.getElementById('worker-submit').focus()")
+        keypress("\ue004")
+        assert js("""const sheet=document.getElementById('worker-sheet');
+            return document.activeElement===document.body || sheet.contains(document.activeElement)""")
+        keypress("\ue00c")
+        wait(lambda: js("return !document.getElementById('worker-sheet').open && document.activeElement.id==='start-worker'"))
         keypress("\ue004")
         for _ in range(8):
             if js("return document.activeElement.textContent==='Allow'"): break
@@ -1286,10 +1307,53 @@ def run(harness, screenshot=None):
             )
         )
         assert js("return document.getElementById('context').textContent.includes('worker 7 · read-only ceiling')")
+        assert js("return document.getElementById('context').textContent.includes('Laptop')")
         js("document.getElementById('stop').click()")
         wait(lambda: {"stop": "child"} in host.actions)
         # The operator starts a worker attached to the open session.
-        js("document.getElementById('start-worker').click()")
+        def worker_viewport(width, height):
+            browser(port, "POST", base + "/goog/cdp/execute", {
+                "cmd": "Emulation.setDeviceMetricsOverride",
+                "params": {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": True},
+            })
+        worker_viewport(320, 740)
+        assert js("""const start=document.getElementById('start-worker');
+            return !start.disabled && start.getBoundingClientRect().height>=44 &&
+                document.documentElement.scrollWidth<=320 &&
+                document.getElementById('location').textContent==='Laptop';""")
+        js("document.getElementById('start-worker').focus()")
+        keypress("\ue007")
+        assert js("""return document.activeElement.id==='worker-heading' &&
+            document.querySelector('label[for=worker-host]').textContent==='Run on'""")
+        wait(lambda: js("""const select=document.getElementById('worker-host');
+            const offline=[...select.options].find(o=>o.value==='studio');
+            return offline?.disabled && offline.text.includes('offline') &&
+                select.selectedOptions[0]?.text.startsWith('Laptop ·') &&
+                document.documentElement.scrollWidth<=320;"""))
+        worker_viewport(320, 420)
+        assert js("""const body=document.querySelector('.worker-sheet-body'),
+            actions=document.querySelector('.worker-sheet-actions'),
+            task=document.getElementById('worker-task'),
+            runtime=document.getElementById('worker-runtime');
+            const initial=actions.getBoundingClientRect();
+            body.scrollTop=body.scrollHeight;
+            const scrolled=actions.getBoundingClientRect();
+            const scrolls=body.scrollTop>0;
+            body.scrollTop=0;
+            return scrolls && task.compareDocumentPosition(runtime) & Node.DOCUMENT_POSITION_FOLLOWING &&
+                body.getBoundingClientRect().bottom<=scrolled.top &&
+                scrolled.top===initial.top && scrolled.bottom<=innerHeight &&
+                [...actions.querySelectorAll('button')].every(b=>b.getBoundingClientRect().height>=44);""")
+        worker_viewport(320, 740)
+        js("document.getElementById('worker-task').value='Local draft'; document.getElementById('worker-open-hosts').click()")
+        wait(lambda: js("""return document.querySelector('#settings h2')?.textContent==='Laptop' &&
+            document.getElementById('settings').innerText.includes('Current host') &&
+            document.getElementById('settings').innerText.includes('No worker destinations are linked.')"""))
+        js("document.querySelector('#settings .back').click()")
+        assert js("""return !document.getElementById('conversation').hidden &&
+            !document.getElementById('worker-form').hidden &&
+            document.getElementById('worker-task').value==='Local draft'""")
+        worker_viewport(390, 844)
         js("document.getElementById('worker-runtime').value='claude';document.getElementById('worker-task').value='Check the pool limits';document.getElementById('worker-form').requestSubmit()")
         wait(lambda: any(isinstance(a, dict) and a.get("start_worker", {}).get("parent") == "child"
                          and a["start_worker"]["task"] == "Check the pool limits" for a in host.actions))

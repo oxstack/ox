@@ -396,6 +396,17 @@ fn peer_projects(entry: &Entity<Inventory>, options: ProjectRows<'_>, cx: &App) 
                 } else {
                     title
                 };
+                let route = if target
+                    .scope
+                    .as_ref()
+                    .zip(target.thread.as_deref())
+                    .and_then(|(scope, thread)| inv.native_row(scope, thread))
+                    .is_some_and(|row| row.worker)
+                {
+                    format!("Worker on {} · {route}", inv.display_name())
+                } else {
+                    route
+                };
 
                 output.push(TreeRow {
                     host: id.clone(),

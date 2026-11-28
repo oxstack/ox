@@ -13,6 +13,8 @@ use std::{
     time::Duration,
 };
 
+const CLOSED_BY_DESKTOP: &str = "Connection closed by desktop";
+
 pub(super) struct Process {
     write: mpsc::Sender<Value>,
     close: mpsc::Sender<String>,
@@ -108,7 +110,7 @@ impl Process {
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => "Connection closed".into(),
             };
-            ready.store(false, Ordering::Release);
+            let was_ready = ready.swap(false, Ordering::AcqRel);
             let group = -(child.id() as i32);
             // Keep the direct child unreaped until the last signal: its group ID cannot be recycled.
             unsafe {
@@ -119,7 +121,13 @@ impl Process {
                 libc::kill(group, libc::SIGKILL);
             }
             let _ = child.wait();
-            let needs_login = diagnostics.join().unwrap_or_default();
+            // A command launched by Claude can retain stderr after its session exits.
+            // The helper's sign-in error is relevant only before initialization.
+            let needs_login = if was_ready && reason == CLOSED_BY_DESKTOP {
+                false
+            } else {
+                diagnostics.join().unwrap_or_default()
+            };
             closed(reason, needs_login);
         });
         Ok(Self { write, close })
@@ -136,6 +144,67 @@ impl Process {
 }
 impl Drop for Process {
     fn drop(&mut self) {
-        let _ = self.close.send("Connection closed by desktop".into());
+        let _ = self.close.send(CLOSED_BY_DESKTOP.into());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initialized_process_closes_with_stderr_inherited_by_a_detached_child() {
+        const HELPER: &str = "OX_TEST_CLAUDE_DETACHED_STDERR_HELPER";
+        const INITIALIZED: &str = "stock-client-ready";
+        if std::env::var_os(HELPER).is_some() {
+            let mut detached = Command::new("sleep")
+                .arg("4")
+                .process_group(0)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap();
+            println!("{INITIALIZED}");
+            detached.wait().unwrap();
+            return;
+        }
+
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child.args([
+            "--exact",
+            "links::claude::process::tests::initialized_process_closes_with_stderr_inherited_by_a_detached_child",
+            "--nocapture",
+        ]);
+        child.env(HELPER, "1");
+        let ready = Arc::new(AtomicBool::new(false));
+        let initialized = ready.clone();
+        let (seen, observed) = mpsc::channel();
+        let (report, closed) = mpsc::channel();
+        let process = Process::spawn(
+            child,
+            move |frame| {
+                if frame
+                    .windows(INITIALIZED.len())
+                    .any(|text| text == INITIALIZED.as_bytes())
+                {
+                    initialized.store(true, Ordering::Release);
+                    let _ = seen.send(());
+                }
+                Ok(())
+            },
+            ready,
+            move |reason, needs_login| {
+                let _ = report.send((reason, needs_login));
+            },
+        )
+        .unwrap();
+
+        observed.recv_timeout(Duration::from_secs(3)).unwrap();
+        drop(process);
+        let (reason, needs_login) = closed
+            .recv_timeout(Duration::from_secs(2))
+            .expect("Closing an initialized runtime must not wait for a detached stderr writer");
+        assert_eq!(reason, CLOSED_BY_DESKTOP);
+        assert!(!needs_login);
     }
 }

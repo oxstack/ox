@@ -871,9 +871,11 @@ impl Host {
         } else {
             let project = self.panes[self.active].read(cx).project.clone();
             self.before_settings = window.focused(cx);
-            self.preferences = Some(cx.new(|cx| {
+            let view = cx.new(|cx| {
                 crate::preferences::Preferences::new(self.link.clone(), project, window, cx)
-            }));
+            });
+            Self::listen_for_settings_continue(&view, window, cx);
+            self.preferences = Some(view);
         }
         let front = self.preferences.is_none();
         self.panes[self.active].update(cx, |p, cx| p.set_front_in(front, window, cx));
@@ -950,7 +952,7 @@ impl Host {
                     crate::kit::nav_row(
                         "running-toggle",
                         format!(
-                            "{running_count} running, {}",
+                            "{running_count} open sessions, {}",
                             if running_open { "hide" } else { "show" }
                         ),
                         crate::kit::ICON_SIZE,
@@ -966,12 +968,12 @@ impl Host {
                     .child(
                         row()
                             .gap(px(SPACE_S))
-                            .child(div().size(px(6.)).rounded_full().bg(rgb(p.success)))
+                            .child(div().size(px(6.)).rounded_full().bg(rgb(p.muted)))
                             .child(
                                 div()
                                     .text_size(p.text(Step::Meta))
                                     .text_color(rgb(p.muted))
-                                    .child(format!("{running_count} running")),
+                                    .child(format!("{running_count} open")),
                             )
                             .child(
                                 div()
@@ -1197,6 +1199,25 @@ impl Host {
             },
         )
         .detach();
+        cx.subscribe_in(
+            pane,
+            window,
+            |s, owner, _: &super::worker_sheet::OpenWorkerHosts, window, cx| {
+                let project = owner.read(cx).project.clone();
+                s.before_settings = window.focused(cx);
+                owner.update(cx, |p, cx| p.set_front(false, cx));
+                s.preferences = Some(cx.new(|cx| {
+                    crate::preferences::Preferences::worker_hosts(
+                        s.link.clone(),
+                        project,
+                        window,
+                        cx,
+                    )
+                }));
+                cx.notify();
+            },
+        )
+        .detach();
         cx.subscribe(pane, |s, _, _: &CatalogChanged, cx| {
             s.refresh_palette_search(cx);
             cx.notify();
@@ -1237,6 +1258,33 @@ impl Host {
         )
         .detach();
     }
+    fn listen_for_settings_continue(
+        view: &Entity<crate::preferences::Preferences>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.subscribe_in(
+            view,
+            window,
+            |host, owner, event: &crate::preferences::ContinueSetup, window, cx| {
+                if host.preferences.as_ref() == Some(owner) {
+                    host.provider_onboarding = None;
+                    host.show_settings(window, cx);
+                    if let Some(model) = &event.0 {
+                        let pane = host.panes[host.active].read(cx);
+                        host.open(
+                            pane.project.clone(),
+                            pane.api_route(model.clone()),
+                            window,
+                            cx,
+                        );
+                    }
+                }
+            },
+        )
+        .detach();
+    }
+
     fn open_providers(
         &mut self,
         owner: &Entity<Workbench>,
@@ -1245,9 +1293,11 @@ impl Host {
     ) {
         let project = owner.read(cx).project.clone();
         owner.update(cx, |p, cx| p.set_front(false, cx));
-        self.preferences = Some(cx.new(|cx| {
+        let view = cx.new(|cx| {
             crate::preferences::Preferences::providers(self.link.clone(), project, window, cx)
-        }));
+        });
+        Self::listen_for_settings_continue(&view, window, cx);
+        self.preferences = Some(view);
         cx.notify();
     }
     fn switch(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -2563,6 +2613,12 @@ impl Host {
         let active = self.panes[self.active].read(cx);
         let active_project = active.project.clone();
         let active_route = active.route.clone();
+        let execution_host = active
+            .host_caption
+            .as_deref()
+            .or_else(|| self.link.remote().map(|host| host.name.as_str()))
+            .unwrap_or("This computer")
+            .to_owned();
         let active_selected = active
             .store
             .as_ref()
@@ -3129,6 +3185,9 @@ impl Host {
                     if let Some(update) = worker_notice {
                         route = format!("{update} · {route}");
                     }
+                    if t.worker {
+                        route = format!("Worker on {execution_host} · {route}");
+                    }
                     route
                 },
                 age: age(now.timestamp(), timestamp),
@@ -3150,8 +3209,12 @@ impl Host {
                 depth,
                 pinned,
                 accent: effective_accent,
-                project_tag: (show_project_tag && depth == 0 && !project_name.is_empty())
-                    .then_some(project_name),
+                project_tag: if t.worker {
+                    Some(execution_host.clone())
+                } else {
+                    (show_project_tag && depth == 0 && !project_name.is_empty())
+                        .then_some(project_name)
+                },
             };
             // The disclosure is a sibling of the row in the gutter, so it folds without
             // selecting and the row keeps the sidebar keyline.
@@ -3372,10 +3435,22 @@ impl Host {
             }
         }
         let pane = self.panes[self.active].read(cx);
-        if pane.pane_width != pane_width || pane.host_caption != host_caption {
+        let worker_update = pane
+            .store
+            .as_ref()
+            .and_then(|store| {
+                self.discovery
+                    .worker_notice(&pane.project, &pane.route, store.selected()?)
+            })
+            .map(str::to_owned);
+        if pane.pane_width != pane_width
+            || pane.host_caption != host_caption
+            || pane.worker_update != worker_update
+        {
             self.panes[self.active].update(cx, |pane, cx| {
                 pane.pane_width = pane_width;
                 pane.host_caption = host_caption;
+                pane.worker_update = worker_update;
                 cx.notify();
             });
         }

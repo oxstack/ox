@@ -112,6 +112,7 @@ pub struct Store {
     /// queued or deferred message keeps the sender that was current when it was accepted.
     sender: Option<crate::surface::Sender>,
     memory: Option<crate::memory::MemoryConfig>,
+    memory_attachments: HashMap<String, crate::memory::Attachment>,
     worker_notice_receipts: Vec<WorkerNoticeReceipt>,
     /// The stamp of each message waiting in `resume_sends`.
     resume_commands: HashMap<String, (crate::codex::request::ThreadCommand, bool)>,
@@ -236,6 +237,7 @@ impl Store {
             resume_sends: Default::default(),
             sender: None,
             memory: None,
+            memory_attachments: HashMap::new(),
             worker_notice_receipts: Vec::new(),
             resume_commands: Default::default(),
             resume_senders: Default::default(),

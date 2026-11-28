@@ -73,6 +73,9 @@ pub enum Request {
         id: String,
         revision: String,
     },
+    ProviderModels {
+        id: String,
+    },
     EditKey {
         revision: String,
         name: String,

@@ -697,7 +697,36 @@ impl super::Workspace {
                     .can_open(target.scope.as_ref(), target.thread.as_deref())
         })
     }
-    pub(super) fn open_destination(
+    pub(crate) fn linked_worker_lead(
+        &self,
+        lead: &ox_desk_core::origin::LinkedParent,
+        cx: &App,
+    ) -> Option<(String, Option<Destination>)> {
+        let (host, entry) = self.inventory.iter().find(|(host, entry)| {
+            host.as_deref() == Some(lead.host.as_str())
+                || entry
+                    .read(cx)
+                    .info
+                    .as_ref()
+                    .and_then(|info| info.id.as_deref())
+                    == Some(lead.host.as_str())
+        })?;
+        let label = format!("Lead on {}", self.host_name(host, cx));
+        let destination = lead
+            .parent
+            .scope
+            .as_ref()
+            .zip(lead.parent.session.as_ref())
+            .map(|(scope, thread)| Destination {
+                host: host.clone(),
+                registration: entry.entity_id(),
+                scope: Some(scope.clone()),
+                thread: Some(thread.clone()),
+            })
+            .filter(|destination| self.reachable(destination, cx));
+        Some((label, destination))
+    }
+    pub(crate) fn open_destination(
         &mut self,
         target: &Destination,
         w: &mut Window,

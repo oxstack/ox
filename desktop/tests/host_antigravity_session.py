@@ -259,6 +259,10 @@ def yolo_with_memory(root, host, helper, log):
             state = snapshot(target, target_scope)
         row = next(row for row in state["sessions"] if row["id"] == session)
         assert row["detail"]["access"] == "yolo", row
+        assert row["detail"]["memory_attachment"] == {
+            "entries": 1,
+            "from_parent_host": False,
+        }, row
         assert texts(state["transcripts"][session], "user") == [first], state["transcripts"][session]
         target.act(target_scope, "follow-up", {"send_text": [session, follow_up]})
         finished(target, session)

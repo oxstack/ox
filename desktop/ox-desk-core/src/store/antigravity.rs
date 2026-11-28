@@ -59,6 +59,7 @@ struct Session {
     start_mode: Option<Access>,
     embedded_context: bool,
     first_context: Option<String>,
+    first_attachment: Option<crate::memory::Attachment>,
     handoff: bool,
     pending: Option<(i64, Pending, Option<Instant>)>,
     options: SessionOptions,
@@ -71,7 +72,7 @@ enum Pending {
     StartMode(Access),
     Mode(Access),
     Model(String),
-    Prompt(String),
+    Prompt(String, Option<crate::memory::Attachment>),
 }
 
 #[derive(Default)]
@@ -144,7 +145,7 @@ impl Session {
     fn request(&mut self, id: i64, kind: Pending, method: &str, params: Value) -> io::Result<()> {
         self.link.request(id, method, params)?;
         let deadline =
-            (!matches!(kind, Pending::Prompt(_))).then(|| Instant::now() + CONTROL_TIMEOUT);
+            (!matches!(kind, Pending::Prompt(..))).then(|| Instant::now() + CONTROL_TIMEOUT);
         self.pending = Some((id, kind, deadline));
         Ok(())
     }
@@ -308,9 +309,11 @@ impl Store {
             start_mode == Some(Access::Yolo),
             move |event| deliver(LinkEvent::Antigravity(Event { generation, event })),
         )?;
-        let first_context = first_prompt
-            .as_ref()
-            .and_then(|_| self.first_turn_context());
+        let (first_context, first_attachment) = if first_prompt.is_some() {
+            self.first_turn_context()
+        } else {
+            (None, None)
+        };
         let (owner, turn_floor) =
             saved.map_or((None, 0), |saved| (Some(saved.row.id), saved.turn_floor));
         let mut session = Session {
@@ -321,6 +324,7 @@ impl Store {
             handoff,
             embedded_context: false,
             first_context,
+            first_attachment,
             pending: None,
             options: SessionOptions::default(),
             stream: Stream {
@@ -378,7 +382,7 @@ impl Store {
         }
         if let Some(id) = owner {
             let generation = self.agy_generation(id).expect("ready session");
-            self.antigravity_prompt(generation, text, self.sender_context())?;
+            self.antigravity_prompt(generation, text, self.sender_context(), None)?;
             self.restored_drafts.remove(id);
         } else {
             self.antigravity_spawn(None, Some(text), self.next_access(), false)?;
@@ -393,6 +397,7 @@ impl Store {
         generation: i64,
         text: String,
         context: Option<String>,
+        attachment: Option<crate::memory::Attachment>,
     ) -> io::Result<()> {
         self.seq += 1;
         let seq = self.seq;
@@ -403,6 +408,7 @@ impl Store {
             .expect("active session");
         let id = session.owner.clone().expect("prompt needs a session");
         let mut prompt = Vec::new();
+        let mut sent_attachment = None;
         if session.embedded_context
             && let Some(context) = context
         {
@@ -411,6 +417,7 @@ impl Store {
                 "resource": {"uri":TURN_CONTEXT_URI, "mimeType":"text/plain", "text":context},
                 "annotations": {"audience":["assistant"]}
             }));
+            sent_attachment = attachment;
         }
         prompt.push(json!({"type":"text","text":&text}));
         let params = json!({"sessionId": native_id(&id), "prompt":prompt});
@@ -420,7 +427,12 @@ impl Store {
             .max(session.stream.turn_floor)
             .checked_add(1)
             .ok_or_else(|| io::Error::other("Antigravity session turn numbers are exhausted."))?;
-        session.request(seq, Pending::Prompt(text.clone()), "session/prompt", params)?;
+        session.request(
+            seq,
+            Pending::Prompt(text.clone(), sent_attachment),
+            "session/prompt",
+            params,
+        )?;
         session.stream.turn = number;
         session.stream.chunk = None;
         session.stream.tools.clear();
@@ -709,8 +721,13 @@ impl Store {
     ) -> io::Result<()> {
         let get_owner = |store: &Self| store.agy().sessions[&generation].owner.clone();
         let response = match (pending, result) {
-            (Pending::Prompt(text), result) => {
+            (Pending::Prompt(text, attachment), result) => {
                 let id = get_owner(self).expect("prompt session");
+                if result.is_ok()
+                    && let Some(attachment) = attachment
+                {
+                    self.remember_memory_attachment(&id, attachment);
+                }
                 self.antigravity_finish(generation, &id, text, result);
                 return Ok(());
             }
@@ -828,7 +845,7 @@ impl Store {
                 let id = session.owner.clone().expect("model session");
                 self.antigravity_publish_options(&id);
             }
-            Pending::Prompt(_) => unreachable!("processed separately"),
+            Pending::Prompt(..) => unreachable!("processed separately"),
         }
         self.changed.mark(Changed::THREADS);
         Ok(())
@@ -843,6 +860,7 @@ impl Store {
         let id = session.owner.clone().expect("open session");
         let first = session.first_prompt.clone();
         let first_context = session.first_context.take();
+        let first_attachment = session.first_attachment.take();
         session.stream.chunk = None;
         let t = self.transcripts.entry(id.clone()).or_default();
         t.loading = false;
@@ -860,7 +878,9 @@ impl Store {
             })).map_err(io::Error::other)?;
             self.catalog.insert(row);
             self.catalog_revision += 1;
-            if let Err(err) = self.antigravity_prompt(generation, text, first_context) {
+            if let Err(err) =
+                self.antigravity_prompt(generation, text, first_context, first_attachment)
+            {
                 self.catalog.remove(&id);
                 return Err(err);
             }

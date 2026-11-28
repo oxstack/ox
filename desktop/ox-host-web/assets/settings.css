@@ -112,6 +112,21 @@
 .phone-settings-card > * + * {
   margin-top: 0.35rem;
 }
+.phone-settings-host-address {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.phone-settings-host-open {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  color: var(--accent);
+  font-weight: 600;
+}
+.phone-settings-host-open:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 3px;
+}
 .phone-push-permission {
   border-radius: 0.75rem;
 }

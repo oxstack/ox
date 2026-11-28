@@ -153,6 +153,8 @@ pub(crate) struct SavedSession {
     access: Option<ox_desk_core::runtime::Access>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_result: Option<SessionResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_attachment: Option<ox_desk_core::memory::Attachment>,
 }
 impl SavedScope {
     pub(crate) fn from_state(s: &ScopeState) -> Self {
@@ -183,6 +185,10 @@ impl SavedScope {
                     marks: serde_json::from_value(r.detail["worker_marks"].clone()).ok(),
                     access: access("access").or_else(|| access("resume_access")),
                     last_result: r.last_result(),
+                    memory_attachment: serde_json::from_value(
+                        r.detail["memory_attachment"].clone(),
+                    )
+                    .ok(),
                 }
             })
             .collect();
@@ -226,6 +232,9 @@ impl SavedScope {
                         "worker_marks": s.marks,
                         "resume_access": s.access,
                     });
+                    if let Some(attachment) = &s.memory_attachment {
+                        detail["memory_attachment"] = serde_json::json!(attachment);
+                    }
                     if let Some(result) = &s.last_result {
                         detail["last_result"] = serde_json::json!(result);
                     }
@@ -690,6 +699,7 @@ mod tests {
                 completed_at: 41,
                 outcome: SessionOutcome::Completed,
             }),
+            memory_attachment: None,
         };
         let saved = |scope: &Scope, sessions| SavedScope {
             scope: scope.clone(),

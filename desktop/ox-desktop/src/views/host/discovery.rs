@@ -2,7 +2,7 @@
 //! operation here that creates a project workbench.
 use super::*;
 use crate::sidebar_state::{GroupingMode, ThreadMetaKey};
-use ox_desk_core::host_protocol::{Scope as HostScope, SessionResult};
+use ox_desk_core::host_protocol::{Scope as HostScope, SessionOutcome, SessionResult};
 use ox_desk_core::origin::{Origin, Relation};
 use ox_desk_core::runtime::Runtime;
 use std::{
@@ -142,6 +142,31 @@ pub(crate) struct Tree {
 pub(crate) struct WorkerIndex {
     pub trees: HashMap<(PathBuf, String), Tree>,
     pub parents: HashMap<(PathBuf, String), ParentLink>,
+    pub results: HashMap<(HostScope, String), Vec<WorkerRow>>,
+}
+
+pub(crate) struct WorkerRow {
+    pub target: ParentLink,
+    pub status: &'static str,
+    pub billing: String,
+    pub access: String,
+    pub model: Option<String>,
+}
+
+fn worker_status(status: &str, result: Option<&SessionResult>) -> &'static str {
+    match status {
+        "needs_input" => "Needs you",
+        "running" => "Running",
+        "queued" => "Queued",
+        "failed" => "Failed",
+        "interrupted" => "Interrupted",
+        _ => match result.map(|result| result.outcome) {
+            Some(SessionOutcome::Completed) => "Completed",
+            Some(SessionOutcome::Failed) => "Failed",
+            Some(SessionOutcome::Stopped) => "Stopped",
+            None => "Open",
+        },
+    }
 }
 
 /// Where a worker's recorded parent lives. The origin stamp carries the parent's
@@ -160,7 +185,7 @@ impl ParentLink {
     /// A launch stamp names its parent. Handoffs record a source rather than a
     /// worker parent and keep their existing presentation.
     fn from_origin(origin: &Origin) -> Option<Self> {
-        if origin.relation == Relation::Handoff {
+        if origin.relation == Relation::Handoff || origin.linked.is_some() {
             return None;
         }
         let id = origin.parent.session.clone()?;
@@ -415,6 +440,48 @@ impl Discovery {
             _ => None,
         };
         Some((h.route.clone(), status))
+    }
+
+    fn worker_results(&self) -> HashMap<(HostScope, String), Vec<WorkerRow>> {
+        let mut workers = HashMap::<_, Vec<_>>::new();
+        let mut ordered: Vec<_> = self.hosted.iter().collect();
+        ordered.sort_by(|a, b| {
+            b.saved
+                .row
+                .updated_at
+                .cmp(&a.saved.row.updated_at)
+                .then_with(|| a.saved.row.id.cmp(&b.saved.row.id))
+        });
+        for worker in ordered {
+            let Some(origin) = worker
+                .origin
+                .as_ref()
+                .filter(|origin| origin.relation == Relation::Worker && origin.linked.is_none())
+            else {
+                continue;
+            };
+            let (Some(parent), Some(session)) = (&origin.parent.scope, &origin.parent.session)
+            else {
+                continue;
+            };
+            let row = &worker.saved.row;
+            workers
+                .entry((parent.clone(), session.clone()))
+                .or_default()
+                .push(WorkerRow {
+                    target: ParentLink {
+                        project: row.cwd.clone(),
+                        route: Some(worker.route.clone()),
+                        title: Some(row.title().to_owned()),
+                        id: row.id.clone(),
+                    },
+                    status: worker_status(&worker.status, worker.result.as_ref()),
+                    billing: worker.route.label(),
+                    access: origin.ceiling.label(origin.runtime).to_owned(),
+                    model: worker.actual_model.clone(),
+                });
+        }
+        workers
     }
 
     fn replace(&mut self, runtime: Runtime, api: Option<bool>, rows: Vec<ThreadRow>) {
@@ -1022,6 +1089,10 @@ impl Host {
                 .and_then(|parent| resolve_parent_key(parent, &by_scope, &by_project));
             // Native subagent rows carry only a parent thread id in the same project.
             if recorded.is_none()
+                && entry
+                    .origin
+                    .as_ref()
+                    .is_none_or(|origin| origin.linked.is_none())
                 && let Some(parent) = &entry.parent
             {
                 resolved = by_scope
@@ -1073,7 +1144,9 @@ impl Host {
         for (key, _, _) in &roots {
             self.walk_tree(key, &children, cx, &mut tree);
         }
+        let worker_results = self.discovery.worker_results();
         self.workers.update(cx, |index, _| {
+            index.results = worker_results;
             index.trees = tree;
             index.parents = links;
         });
@@ -1740,5 +1813,24 @@ mod parent_link_tests {
             ))
             .is_none()
         );
+    }
+
+    #[test]
+    fn a_linked_workers_lead_is_never_resolved_in_the_receiving_hosts_catalog() {
+        let mut worker = origin(
+            Relation::Worker,
+            "/work/parent",
+            Some(hosted_parent()),
+            Some("p"),
+        );
+        worker.linked = Some(Box::new(ox_desk_core::origin::LinkedParent {
+            host: "source-host".into(),
+            device: "source-registration".into(),
+            request_id: "worker-request".into(),
+            parent: worker.parent.clone(),
+            verified_level: ox_desk_core::modes::Level::Read,
+            link_ceiling: ox_desk_core::modes::Level::Read,
+        }));
+        assert!(ParentLink::from_origin(&worker).is_none());
     }
 }

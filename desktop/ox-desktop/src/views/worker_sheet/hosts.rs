@@ -149,8 +149,12 @@ pub(super) struct Picker {
     cpus: Entity<InputState>,
     os: Entity<InputState>,
     gpu: bool,
+    refresh: flume::Sender<()>,
     _refresh: Task<()>,
 }
+
+pub(in crate::views) struct OpenWorkerHosts;
+impl EventEmitter<OpenWorkerHosts> for Workbench {}
 
 impl Picker {
     pub(super) fn new(
@@ -159,7 +163,8 @@ impl Picker {
         window: &mut Window,
         cx: &mut Context<Workbench>,
     ) -> Self {
-        let refresh = cx.spawn(async move |this, cx| {
+        let (refresh, requested) = flume::bounded(1);
+        let task = cx.spawn(async move |this, cx| {
             loop {
                 let link = link.clone();
                 let project = project.clone();
@@ -181,9 +186,13 @@ impl Picker {
                 if legacy {
                     return;
                 }
-                cx.background_executor()
-                    .timer(Duration::from_secs(30))
-                    .await;
+                futures_lite::future::or(
+                    cx.background_executor().timer(Duration::from_secs(30)),
+                    async {
+                        let _ = requested.recv_async().await;
+                    },
+                )
+                .await;
             }
         });
         Self {
@@ -193,7 +202,8 @@ impl Picker {
             cpus: kit::field("", "Any", false, window, cx),
             os: kit::field("", "Any", false, window, cx),
             gpu: false,
-            _refresh: refresh,
+            refresh,
+            _refresh: task,
         }
     }
 
@@ -285,6 +295,12 @@ impl Picker {
 }
 
 impl Workbench {
+    pub(in crate::views) fn refresh_worker_hosts(&self) {
+        if let Some(Launch::Worker(draft)) = &self.launch {
+            let _ = draft.hosts.refresh.try_send(());
+        }
+    }
+
     fn set_worker_host(&mut self, host: String, cx: &mut Context<Self>) {
         self.launch_picker = None;
         if let Some(Launch::Worker(d)) = &mut self.launch {
@@ -301,7 +317,16 @@ impl Workbench {
             .and_then(|r| r.as_ref().ok())
             .and_then(Option::as_ref);
         let mut choices = row().flex_wrap().gap_2();
-        let mut entries = vec![("parent".to_owned(), "Same as parent".to_owned(), true)];
+        let source = self
+            .host_caption
+            .as_deref()
+            .or_else(|| self.link.remote().map(|h| h.name.as_str()))
+            .unwrap_or("This computer");
+        let mut entries = vec![(
+            "parent".to_owned(),
+            format!("{source} · this session’s host"),
+            true,
+        )];
         if let Some(inventory) = inventory {
             for entry in &inventory.hosts {
                 let id = if entry.parent_host {
@@ -309,19 +334,19 @@ impl Workbench {
                 } else {
                     &entry.host.id
                 };
-                let name = if entry.parent_host {
-                    "Same as parent"
-                } else {
-                    entry.paired_name.as_ref().unwrap_or(&entry.host.name)
-                };
-                let label = if let Some(r) = &entry.host.resources {
+                let name = entry.paired_name.as_ref().unwrap_or(&entry.host.name);
+                let label = if entry.parent_host {
+                    format!("{name} · this session’s host")
+                } else if entry.status != "online" {
+                    format!("{name} · {}", entry.status.replace('_', " "))
+                } else if let Some(r) = &entry.host.resources {
                     format!(
                         "{name} · load {:.1} · {:.1} GB free",
                         r.load_one_minute,
                         r.available_memory as f64 / 1e9
                     )
                 } else {
-                    format!("{name} · {}", entry.status.replace('_', " "))
+                    name.clone()
                 };
                 if entry.parent_host {
                     entries[0].1 = label;
@@ -340,7 +365,7 @@ impl Workbench {
                 .join(" · ");
                 entries.push(("project".into(), label, true));
             }
-            entries.push(("auto".into(), "Auto".into(), true));
+            entries.push(("auto".into(), "Auto (match requirements)".into(), true));
         }
         for (i, (id, label, enabled)) in entries.into_iter().enumerate() {
             choices = choices.child(button(
@@ -357,12 +382,33 @@ impl Workbench {
             None => Some("Loading worker hosts…"),
             Some(Err(e)) => Some(e.as_str()),
             Some(Ok(Some(v))) => v.warning.as_deref().or(v.placement_error.as_deref()),
-            _ => None,
+            Some(Ok(None)) => Some("Update this host to run workers on linked hosts."),
         };
         if let Some(status) = status {
             content = content.child(small(p, status.to_owned()));
         }
         if let Some(inventory) = inventory {
+            let linked = inventory.hosts.iter().any(|entry| !entry.parent_host);
+            if !linked {
+                content = content.child(small(
+                    p,
+                    "Allow workers from this session’s host to run on another computer.",
+                ));
+            }
+            content = content.child(
+                kit::toolbar_button(
+                    p,
+                    "worker-host-settings",
+                    if linked {
+                        "Manage worker hosts…"
+                    } else {
+                        "Set up worker hosts…"
+                    },
+                    true,
+                    cx.listener(|_, _, _, cx| cx.emit(OpenWorkerHosts)),
+                )
+                .self_start(),
+            );
             let route = draft.choice.runtime.route(draft.choice.model.clone());
             for line in limit_lines(
                 inventory,
@@ -396,7 +442,7 @@ impl Workbench {
                 }),
             ));
         }
-        field(p, "Worker host", content)
+        field(p, "Run on", content)
     }
 }
 

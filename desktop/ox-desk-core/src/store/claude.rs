@@ -77,6 +77,7 @@ struct Process {
     /// The sender statement of `first`, fixed when the host accepted that message. It
     /// waits with the message while the process starts, and goes out with it.
     first_context: Option<String>,
+    memory_attachment: Option<(String, crate::memory::Attachment)>,
     /// Native message UUID and durable host notice id until the CLI echoes it.
     worker_notice: Option<(String, u64)>,
     /// The permission mode this process was launched with.
@@ -778,13 +779,14 @@ impl Store {
             .is_some_and(|(_, text)| text.trim_start().starts_with('/'));
         let deliver_brief_now = is_new && first.is_some() && !first_is_command;
         let memory_brief_pending = is_new && !deliver_brief_now;
-        let first_context = first.as_ref().and_then(|_| {
-            if deliver_brief_now {
-                self.first_turn_context()
-            } else {
-                self.sender_context()
-            }
-        });
+        let (first_context, attachment) = if deliver_brief_now {
+            self.first_turn_context()
+        } else {
+            (first.as_ref().and_then(|_| self.sender_context()), None)
+        };
+        let memory_attachment = first
+            .as_ref()
+            .and_then(|(uuid, _)| Some((uuid.clone(), attachment?)));
         let worker_notice = first
             .as_ref()
             .and_then(|(uuid, _)| Some((uuid.clone(), self.worker_notice_id()?)));
@@ -800,6 +802,7 @@ impl Store {
                 generation,
                 first,
                 first_context,
+                memory_attachment,
                 worker_notice,
                 launch_mode: mode.clone(),
                 selected_model: model.clone(),
@@ -1008,10 +1011,10 @@ impl Store {
                 .get(&owner)
                 .is_some_and(|p| p.memory_brief_pending);
         let deliver_brief = brief_pending && !is_command;
-        let context = if deliver_brief {
+        let (context, attachment) = if deliver_brief {
             self.first_turn_context()
         } else {
-            self.sender_context()
+            (self.sender_context(), None)
         };
         let worker_notice = self.worker_notice_id();
         let process = self
@@ -1021,6 +1024,7 @@ impl Store {
             .ok_or_else(|| io::Error::other("Reconnect the session before sending"))?;
         if deliver_brief {
             process.memory_brief_pending = false;
+            process.memory_attachment = attachment.map(|attachment| (message.clone(), attachment));
         }
         if let Some(id) = worker_notice {
             process.worker_notice = Some((message.clone(), id));

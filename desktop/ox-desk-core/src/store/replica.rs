@@ -848,6 +848,7 @@ impl Store {
             "yolo_grant_expires",
             "yolo_children",
             "worker_model",
+            "memory_attachment",
         ]
         .into_iter()
         .filter_map(|k| Some((k.to_owned(), data.get(k)?.clone())))

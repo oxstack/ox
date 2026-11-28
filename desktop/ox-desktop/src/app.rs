@@ -399,6 +399,7 @@ impl Workspace {
 }
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::platform::restore_probe::first_frame(window);
         crate::platform::layout_probe::begin_frame(window, "OX Desktop", || ());
         if !cx.has_global::<FailedView>() {
             let p = Palette::get(cx);

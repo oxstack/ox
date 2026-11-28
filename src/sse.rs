@@ -6,8 +6,6 @@
 //! oversized events instead of growing without bound, and reports an upstream
 //! that ends mid-event so a truncated stream can never look complete.
 
-use std::mem;
-
 /// Default ceiling for one framed event (its `data` payload plus field names).
 pub const DEFAULT_MAX_EVENT_BYTES: usize = 1024 * 1024;
 
@@ -25,8 +23,7 @@ pub struct SseFramer {
     max_event_bytes: usize,
     partial: Vec<u8>,
     event: Option<String>,
-    data: Vec<String>,
-    data_bytes: usize,
+    data: Option<String>,
     /// Set once the framer reported a framing error; the stream is unusable.
     poisoned: bool,
 }
@@ -43,8 +40,7 @@ impl SseFramer {
             max_event_bytes,
             partial: Vec::new(),
             event: None,
-            data: Vec::new(),
-            data_bytes: 0,
+            data: None,
             poisoned: false,
         }
     }
@@ -86,7 +82,7 @@ impl SseFramer {
     /// Finish the stream. Any buffered partial line or undispatched event means
     /// the upstream was truncated mid-event, which is a stream error.
     pub fn finish(&mut self) -> Result<(), String> {
-        if !self.partial.is_empty() || !self.data.is_empty() || self.event.is_some() {
+        if !self.partial.is_empty() || self.data.is_some() || self.event.is_some() {
             self.poisoned = true;
             return Err("the upstream SSE stream ended in the middle of an event".to_owned());
         }
@@ -115,20 +111,26 @@ impl SseFramer {
             }
             None => (line, &b""[..]),
         };
-        let value = std::str::from_utf8(value).map_err(|_| ())?.to_owned();
+        let value = std::str::from_utf8(value).map_err(|_| ())?;
         match field {
             b"event" => {
                 if value.len() > self.max_event_bytes {
                     return Err(());
                 }
-                self.event = Some(value);
+                self.event = Some(value.to_owned());
             }
             b"data" => {
-                if self.data_bytes + value.len() > self.max_event_bytes {
+                let prefix = self.data.as_ref().map_or(0, |data| data.len() + 1);
+                if prefix.saturating_add(value.len()) > self.max_event_bytes {
                     return Err(());
                 }
-                self.data_bytes += value.len();
-                self.data.push(value);
+                match self.data.as_mut() {
+                    Some(data) => {
+                        data.push('\n');
+                        data.push_str(value);
+                    }
+                    None => self.data = Some(value.to_owned()),
+                }
             }
             // `id`, `retry`, comments and unknown fields carry no meaning for
             // either translated protocol.
@@ -139,12 +141,10 @@ impl SseFramer {
 
     fn dispatch(&mut self, events: &mut Vec<SseEvent>) -> Result<(), ()> {
         let event = self.event.take();
-        if self.data.is_empty() {
+        let Some(data) = self.data.take() else {
             // A bare blank line is a keepalive, not an event.
             return Ok(());
-        }
-        let data = mem::take(&mut self.data).join("\n");
-        self.data_bytes = 0;
+        };
         events.push(SseEvent { event, data });
         Ok(())
     }
@@ -201,6 +201,12 @@ mod tests {
         let mut framer = SseFramer::new(16);
         assert!(framer.feed(b"data: 0123456789abcdefg\n").is_err());
         assert!(framer.feed(b"data: ok\n\n").is_err());
+    }
+
+    #[test]
+    fn joined_empty_data_lines_count_towards_the_event_size() {
+        let mut framer = SseFramer::new(2);
+        assert!(framer.feed(b"data:\ndata:\ndata:\ndata:\n").is_err());
     }
 
     #[test]

@@ -10,6 +10,8 @@ use crate::appearance::Step;
 use crate::kit::{button, col, icon_button, row, small, toolbar_button};
 use gpui::*;
 use gpui_component::input::{Textarea, TextareaState};
+use gpui_component::scroll::ScrollableElement;
+pub(super) use hosts::OpenWorkerHosts;
 use ox_desk_core::actions::Action as DeskAction;
 use ox_desk_core::modes::{Level, ModeRequest};
 use ox_desk_core::origin::{WorkerMode, WorkerStart};
@@ -210,7 +212,36 @@ fn field(p: Palette, label: &'static str, control: impl IntoElement) -> Div {
 }
 
 impl Workbench {
+    pub(super) fn start_worker_button(
+        &self,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_component::button::Button> {
+        let store = self.store.as_ref()?;
+        let owner = store.selected()?;
+        (store.state() == &Connection::Ready
+            && store.profile().route.runtime.supports_workers()
+            && !store.in_terminal(owner))
+        .then(|| {
+            crate::kit::toolbar_button(
+                p,
+                "start-worker",
+                "Start worker…",
+                true,
+                cx.listener(|s, _, _, cx| s.request_launch(LaunchKind::Worker, cx)),
+            )
+            .tooltip("Choose a task and where the worker runs")
+        })
+    }
+
     pub(super) fn request_launch(&mut self, kind: LaunchKind, cx: &mut Context<Self>) {
+        if self
+            .launch
+            .as_ref()
+            .is_some_and(|launch| launch.kind() == kind)
+        {
+            return;
+        }
         self.launch_request = Some(kind);
         cx.notify();
     }
@@ -638,18 +669,18 @@ impl Workbench {
                 cx.listener(|s, _, _, cx| s.close_launch(cx)),
             ));
 
-        let mut body = col()
-            .gap_3()
-            .child(header)
-            .child(self.runtime_row(p, &choice, cx));
+        let mut body = col().gap_3();
         match launch {
             Launch::Worker(draft) => {
                 body = body
                     .child(self.host_row(p, draft, cx))
+                    .child(field(p, "Task", Textarea::new(&draft.task)))
+                    .child(self.runtime_row(p, &choice, cx))
                     .child(self.mode_row(p, draft, cx))
                     .child(self.model_row(p, &choice, cx));
             }
             Launch::Handoff(draft) => {
+                body = body.child(self.runtime_row(p, &choice, cx));
                 let targets = self.handoff_destinations(cx);
                 if !targets.is_empty() || draft.destination.is_some() {
                     let mut chips = row().flex_wrap().gap_1().child(button(
@@ -715,9 +746,7 @@ impl Workbench {
         }
         body = body.child(self.permission_row(p, &choice, cx));
         match launch {
-            Launch::Worker(draft) => {
-                body = body.child(field(p, "Task", Textarea::new(&draft.task)));
-            }
+            Launch::Worker(_) => {}
             Launch::Handoff(draft) => {
                 body = body.child(field(p, "Request", Textarea::new(&draft.request)));
                 let route = choice.runtime.route(choice.model.clone());
@@ -738,6 +767,7 @@ impl Workbench {
             );
         }
         let footer = row()
+            .flex_shrink_0()
             .justify_end()
             .gap_2()
             .child(toolbar_button(
@@ -764,7 +794,6 @@ impl Workbench {
             .w_full()
             .flex_shrink_0()
             .max_h(max_height)
-            .overflow_y_scroll()
             .p_3()
             .gap_3()
             .border_t_2()
@@ -776,7 +805,19 @@ impl Workbench {
                     cx.stop_propagation();
                 }
             }));
-        Some(frame.child(body).child(footer).into_any_element())
+        Some(
+            frame
+                .child(header.flex_shrink_0())
+                .child(
+                    div()
+                        .id("launch-fields")
+                        .min_h_0()
+                        .overflow_y_scrollbar()
+                        .child(body),
+                )
+                .child(footer)
+                .into_any_element(),
+        )
     }
 }
 
