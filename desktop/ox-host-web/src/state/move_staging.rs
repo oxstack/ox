@@ -811,6 +811,7 @@ mod tests {
                         })
                         .await
                         .unwrap();
+                        connection.finish().await;
                     },
                 )
             }),
@@ -851,6 +852,11 @@ mod tests {
                 for name in [PLAN, TRANSCRIPT, CHECKOUT] {
                     fs::remove_file(sender_files.path().join(name)).unwrap();
                 }
+            } else {
+                assert!(matches!(
+                    socket.next().await.unwrap(),
+                    ClientMessage::Close(_)
+                ));
             }
         }
         running.abort();

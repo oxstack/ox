@@ -168,6 +168,7 @@ pub(crate) async fn prepare(
             if let Err(error) = result {
                 move_staging::send_error(&connection, &error).await;
             }
+            connection.finish().await;
         }))
 }
 
