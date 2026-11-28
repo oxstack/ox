@@ -64,6 +64,48 @@ pub struct LinkedParent {
     pub link_ceiling: Ceiling,
 }
 
+/// A job dispatched by this conversation to a linked worker host.
+/// The receiving host can report a narrower access ceiling and the actual model.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LinkedWorkerSummary {
+    pub job: u64,
+    pub host: String,
+    pub name: String,
+    pub title: Option<String>,
+    pub route: Route,
+    pub status: String,
+    pub ceiling: Option<Ceiling>,
+    pub actual_model: Option<String>,
+    pub target: Option<LinkedWorkerSession>,
+    pub phone_target: Option<String>,
+}
+
+impl LinkedWorkerSummary {
+    pub fn status_label(&self) -> &str {
+        match self.status.as_str() {
+            "preparing" => "Preparing checkout",
+            "starting" => "Starting",
+            "running" => "Running",
+            "waiting_for_operator" => "Needs you",
+            "returning_result" => "Returning changes",
+            "completed" => "Completed",
+            "failed" => "Failed",
+            "cancelled" => "Cancelled",
+            "interrupted" => "Interrupted",
+            "declined" => "Declined",
+            "detached" => "Link unavailable",
+            _ => "Status unavailable",
+        }
+    }
+}
+
+/// The session and checkout reported by the receiving worker host.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LinkedWorkerSession {
+    pub scope: Scope,
+    pub session: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Origin {

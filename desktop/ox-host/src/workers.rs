@@ -713,6 +713,7 @@ pub(crate) fn status(
         },
         "native_session": native,
         "session": id,
+        "title": view.map(|r| &r.title),
         "owner": "host",
         "access_ceiling": o.ceiling,
         "started_mode": o.started,

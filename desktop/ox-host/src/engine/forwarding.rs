@@ -4,6 +4,7 @@ use super::forward_queue::{Pending, path as queue_path};
 use super::*;
 use crate::workers::{Entry, Marks, Resolved, owns};
 use ox_desk_core::modes::ModeRequest;
+use ox_desk_core::origin::{LinkedParent, LinkedWorkerSession, LinkedWorkerSummary};
 use ox_host_web::{
     linked_jobs::{self, JobRequest, JobResult, Operation},
     paired_hosts::{self, SavedHost},
@@ -32,6 +33,14 @@ pub(crate) struct Job {
     status: String,
     message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    target: Option<LinkedWorkerSession>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ceiling: Option<Level>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    actual_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     checkout: Option<String>,
     #[serde(default)]
     recovered: bool,
@@ -51,6 +60,48 @@ pub(crate) struct Job {
     source_branch: Option<String>,
 }
 impl Job {
+    fn roster_entry(&self) -> LinkedWorkerSummary {
+        LinkedWorkerSummary {
+            job: self.origin.job_id,
+            host: self.host.clone(),
+            name: self.name.clone(),
+            title: self.title.clone(),
+            route: self.origin.route.clone(),
+            status: self.status.clone(),
+            ceiling: self.ceiling,
+            actual_model: self.actual_model.clone(),
+            target: self.target.clone(),
+            phone_target: self.target.as_ref().and_then(|target| {
+                ox_host_web::phone_link::session_target(&target.scope, &target.session).ok()
+            }),
+        }
+    }
+
+    fn observed_target(&self, source: &str, view: &Value) -> Option<LinkedWorkerSession> {
+        // Only use the registered job's own lineage and actual session, never an
+        // inventory match by title, a native session ID, or the source checkout.
+        let linked: LinkedParent =
+            serde_json::from_value(view.get("linked_parent")?.clone()).ok()?;
+        if linked.host != source
+            || linked.request_id != self.request.to_string()
+            || linked.parent != self.origin.parent
+        {
+            return None;
+        }
+        let session = view["session"].as_str().filter(|id| !id.is_empty())?;
+        let project = view["checkout"].as_str().map(PathBuf::from)?;
+        if !project.is_absolute() {
+            return None;
+        }
+        Some(LinkedWorkerSession {
+            scope: Scope {
+                project,
+                route: self.origin.route.clone(),
+            },
+            session: session.to_owned(),
+        })
+    }
+
     pub(super) fn owned(&self, me: &Resolved) -> bool {
         owns(
             me,
@@ -162,6 +213,34 @@ impl Job {
         })
     }
 }
+
+pub(super) fn roster(data: &crate::durable::Owned, scope: &Scope) -> BTreeMap<String, Value> {
+    let mut roster: BTreeMap<String, Vec<LinkedWorkerSummary>> = BTreeMap::new();
+    for job in data.forwarded.values() {
+        let parent = &job.origin.parent;
+        if parent.scope.as_ref() == Some(scope)
+            && let Some(session) = &parent.session
+        {
+            roster
+                .entry(session.clone())
+                .or_default()
+                .push(job.roster_entry());
+        }
+    }
+    roster
+        .into_iter()
+        .map(|(id, jobs)| (id, json!(jobs)))
+        .collect()
+}
+
+pub(super) fn restore_roster(data: &crate::durable::Owned, state: &mut ScopeState) {
+    let mut roster = roster(data, &state.scope);
+    for row in &mut state.sessions {
+        if let Some(jobs) = roster.remove(&row.id) {
+            row.detail["linked_workers"] = jobs;
+        }
+    }
+}
 #[derive(Default)]
 pub(super) struct State {
     busy: HashSet<u64>,
@@ -269,6 +348,10 @@ impl Engine {
             sync_notices: false,
             status: "preparing".into(),
             message: "Preparing the parent checkout.".into(),
+            target: None,
+            title: None,
+            ceiling: None,
+            actual_model: None,
             checkout: None,
             recovered: false,
             cancel_requested: false,
@@ -337,7 +420,24 @@ impl Engine {
             return Err(e.to_string());
         }
         self.prepare_remote(job);
+        self.publish_forwarded(job).map_err(|e| e.to_string())?;
         Ok(response)
+    }
+
+    fn publish_forwarded(&mut self, id: u64) -> io::Result<()> {
+        let parent = &self.ledger.data.forwarded[&id].origin.parent;
+        let Some((scope, session)) = parent.scope.clone().zip(parent.session.clone()) else {
+            return Ok(());
+        };
+        if self.running.contains_key(&scope) {
+            self.process_scope(&scope, vec![], true)?;
+        } else if let Some(state) = self.cold.get_mut(&scope) {
+            restore_roster(&self.ledger.data, state);
+            if let Some(session) = state.sessions.iter().find(|row| row.id == session).cloned() {
+                self.broadcast(&scope, vec![Change::Session { session }])?;
+            }
+        }
+        Ok(())
     }
     fn prepare_remote(&mut self, id: u64) {
         let j = self.ledger.data.forwarded[&id].clone();
@@ -484,7 +584,8 @@ impl Engine {
                     Some(&j.name),
                 );
             }
-        })
+        })?;
+        self.publish_forwarded(id)
     }
     fn remote_control(&mut self, id: u64, call: ParentCall, reply: Option<Replier>) {
         let kind = match &call {
@@ -683,6 +784,8 @@ impl Engine {
             }
         };
         let job = &self.ledger.data.forwarded[&id];
+        let target = job.observed_target(&self.host_id.to_string(), &view);
+        let before = job.roster_entry();
         if status == "interrupted" && view["status"] == "not_started" {
             if job.awaiting_start && job.active() {
                 return Ok(Ok(job.summary()));
@@ -751,6 +854,25 @@ impl Engine {
             j.awaiting_start = false;
             j.status = status.into();
             j.message = crate::worker_notices::excerpt(message);
+            if let Some(target) = target
+                && j.target.as_ref().is_none_or(|previous| previous == &target)
+            {
+                j.target = Some(target);
+                if let Some(title) = view["title"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                {
+                    j.title = Some(title.chars().take(160).collect());
+                }
+                if let Ok(ceiling) = serde_json::from_value::<Level>(view["access_ceiling"].clone())
+                {
+                    j.ceiling = Some(ceiling);
+                }
+                if let Some(model) = view["actual_model"].as_str().filter(|m| !m.is_empty()) {
+                    j.actual_model = Some(model.chars().take(128).collect());
+                }
+            }
             if !j.active() {
                 j.cancel_requested = false;
             }
@@ -759,6 +881,9 @@ impl Engine {
                     .observe_on(&j.origin, status, &j.message, Some(&j.name));
             }
         })?;
+        if self.ledger.data.forwarded[&id].roster_entry() != before {
+            self.publish_forwarded(id)?;
+        }
         if view["worker_changes_pending"] == true && view["worker_changes_error"].is_string() {
             self.forward
                 .next
@@ -798,6 +923,7 @@ impl Engine {
                             j.status = "starting".into();
                             j.message = "Starting on the worker host.".into();
                         })?;
+                        self.publish_forwarded(id)?;
                         let _ = fs::remove_dir_all(queue.join("snapshot"));
                         self.send_remote(id, *start, Kind::Start, None);
                     }
@@ -859,5 +985,142 @@ impl Engine {
             self.remote_control(id, call, Some(reply));
         }
         self.deliver_worker_notices()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ox_desk_core::runtime::{Route, Runtime};
+
+    fn saved_job(job: u64, scope: &Scope, session: &str) -> Job {
+        // An older ledger has no receiving session, ceiling or actual model.
+        serde_json::from_value(json!({
+            "origin": {
+                "relation": "worker", "parent": {
+                    "project": scope.project, "scope": scope, "session": session, "runtime": "codex"
+                },
+                "launch": "operator:fixture", "by_operator": true, "runtime": "codex",
+                "route": Route::codex_api("fixture/demo".into()), "mode": "session", "job_id": job,
+                "requested": "read", "ceiling": "write", "source": null,
+            },
+            "host": "studio", "name": "Studio", "pairing": "fixture-pairing",
+            "request": uuid::Uuid::new_v4(), "status": "starting", "message": "Starting"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn linked_roster_updates_only_the_recorded_parent_and_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().canonicalize().unwrap();
+        let scope = Scope {
+            project: project.clone(),
+            route: Route::CODEX_SUBSCRIPTION,
+        };
+        let other = Scope {
+            project: project.clone(),
+            route: Route::codex_api("other/demo".into()),
+        };
+        let config = RuntimeConfig {
+            ox: "/usr/bin/false".into(),
+            path: "/bin".into(),
+            desktop: project.clone(),
+        };
+        let (tx, _rx) = std::sync::mpsc::sync_channel(8);
+        let mut engine = Engine::open(config.clone(), dir.path(), tx.clone()).unwrap();
+        engine
+            .ledger
+            .change(|data| {
+                for scope in [&scope, &other] {
+                    let mut state = ScopeState {
+                        scope: scope.clone(),
+                        connection: "ready".into(),
+                        capabilities: vec![],
+                        sessions: vec![],
+                        asks: vec![],
+                        transcripts: Default::default(),
+                        detail: json!({}),
+                    };
+                    for id in ["lead", "sibling"] {
+                        state.sessions.push(wire::SessionView {
+                            id: id.into(),
+                            title: id.into(),
+                            parent: None,
+                            status: "idle".into(),
+                            updated_at: 0,
+                            capabilities: vec![],
+                            detail: json!({"owned": true}),
+                        });
+                    }
+                    data.scopes.push(SavedScope::from_state(&state));
+                }
+                data.forwarded.insert(11, saved_job(11, &scope, "lead"));
+                data.forwarded.insert(12, saved_job(12, &scope, "lead"));
+                data.forwarded.insert(13, saved_job(13, &other, "lead"));
+            })
+            .unwrap();
+        drop(engine);
+        let mut engine = Engine::open(config.clone(), dir.path(), tx.clone()).unwrap();
+        let project = project.join("studio-checkout");
+        let job = &engine.ledger.data.forwarded[&11];
+        let mut view = json!({
+            "job_id": 11, "status": "running", "checkout": project, "session": "studio-run",
+            "title": "Review retry edge cases", "actual_model": "synthetic-model",
+            "runtime": Runtime::Codex, "access_ceiling": "read",
+            "linked_parent": {
+                "host": engine.host_id, "device": "linked-device", "request_id": job.request,
+                "parent": job.origin.parent, "verified_level": "write", "link_ceiling": "read"
+            },
+        });
+        let mut mistaken = view.clone();
+        mistaken["linked_parent"]["parent"]["session"] = "sibling".into();
+        assert!(
+            job.observed_target(&engine.host_id.to_string(), &mistaken)
+                .is_none()
+        );
+        assert!(
+            engine
+                .accept_remote_reply(11, Kind::Start, view.clone())
+                .unwrap()
+                .is_ok()
+        );
+        view["status"] = "completed".into();
+        assert!(
+            engine
+                .accept_remote_reply(11, Kind::Status, view)
+                .unwrap()
+                .is_ok()
+        );
+        for engine in [engine, Engine::open(config, dir.path(), tx).unwrap()] {
+            let rows = &engine.cold[&scope].sessions;
+            let workers =
+                rows.iter().find(|row| row.id == "lead").unwrap().detail["linked_workers"].clone();
+            assert_eq!(workers.as_array().unwrap().len(), 2);
+            assert_eq!(workers[0]["status"], "completed");
+            assert_eq!(workers[0]["host"], "studio");
+            assert_eq!(workers[0]["title"], "Review retry edge cases");
+            assert_eq!(workers[0]["target"]["scope"]["project"], json!(project));
+            assert_eq!(workers[0]["target"]["session"], "studio-run");
+            assert_eq!(workers[0]["actual_model"], "synthetic-model");
+            assert_eq!(workers[0]["ceiling"], "read");
+            assert!(
+                workers[0]["phone_target"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("studio-run~")
+            );
+            assert_eq!(workers[1]["status"], "starting");
+            assert!(workers[1]["target"].is_null());
+            assert!(
+                rows.iter().find(|row| row.id == "sibling").unwrap().detail["linked_workers"]
+                    .is_null()
+            );
+            assert_eq!(
+                engine.cold[&other].sessions[0].detail["linked_workers"][0]["job"],
+                13
+            );
+            assert!(catalog_row(&rows[0]).detail["linked_workers"].is_null());
+        }
     }
 }

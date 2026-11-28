@@ -1240,8 +1240,8 @@ export function setupSettings({ request, open, close, pushStatus, enablePush, lo
     }
     show(initial);
   }
-  async function hosts(back = close, backLabel) {
-    const show = () => hosts(back, backLabel);
+  async function hosts(back = close, backLabel, worker = null) {
+    const show = () => hosts(back, backLabel, worker);
     const id = screen("Hosts", back, backLabel);
     const current = node("div", undefined, "phone-settings-card");
     current.append(node("h2", hostName()), node("p", "Current host"));
@@ -1268,6 +1268,9 @@ export function setupSettings({ request, open, close, pushStatus, enablePush, lo
     }
     if (id !== pageId || panel.hidden) return;
     status.textContent = offline ? "Couldn’t refresh the host list." : "";
+    if (worker && !peers.some(([host]) => host.id === worker.host)) {
+      body.append(node("p", `Check the connection to ${worker.name} to open worker #${worker.job}.`));
+    }
     if (peers.length) body.append(node("p", "Open another host to view its sessions. Pair this phone there if asked."));
     else if (!offline) body.append(node("p", "No worker destinations are linked."));
     for (const [host, state] of peers) {
@@ -1276,7 +1279,12 @@ export function setupSettings({ request, open, close, pushStatus, enablePush, lo
       const origin = registeredHostOrigin(host.origin);
       if (origin) {
         const address = node("p", origin.host, "phone-settings-host-address");
-        const link = node("a", `Open ${host.name}`, "phone-settings-host-open");
+        const target = !offline && host.id === worker?.host ? worker.phone_target : null;
+        if (target) origin.hash = new URLSearchParams({ thread: target }).toString();
+        const label = target
+          ? `Open ${worker.title || `worker #${worker.job}`} on ${host.name}`
+          : `Open ${host.name}`;
+        const link = node("a", label, "phone-settings-host-open");
         link.href = origin.href;
         link.target = "_blank";
         link.rel = "noopener noreferrer";
@@ -1832,9 +1840,9 @@ export function setupSettings({ request, open, close, pushStatus, enablePush, lo
       open();
       return notificationPreferences(close);
     },
-    openHosts(back, backLabel) {
+    openHosts(back, backLabel, worker) {
       open();
-      return hosts(back, backLabel);
+      return hosts(back, backLabel, worker);
     },
     reset() {
       pageId++;

@@ -417,6 +417,7 @@ impl Engine {
             .map(|saved| {
                 let mut state = saved.recover();
                 ledger.data.worker_notices.apply_to(&mut state);
+                forwarding::restore_roster(&ledger.data, &mut state);
                 (saved.scope.clone(), state)
             })
             .collect();
@@ -3356,6 +3357,7 @@ impl Engine {
         let live = self.running.remove(scope).expect("checked above");
         let mut recovered = SavedScope::from_state(&live.state).recover();
         self.ledger.data.worker_notices.apply_to(&mut recovered);
+        forwarding::restore_roster(&self.ledger.data, &mut recovered);
         drop(live);
         let changes = vec![
             Change::State {
@@ -3772,6 +3774,12 @@ fn annotate(
             .or_default()
             .1
             .insert("worker_notice".into(), summary.detail());
+    }
+    for (parent, jobs) in forwarding::roster(data, scope) {
+        out.entry(parent)
+            .or_default()
+            .1
+            .insert("linked_workers".into(), jobs);
     }
     let mut push = |id: &str, key: &str, value: Value| {
         let e = out.entry(id.to_owned()).or_default();

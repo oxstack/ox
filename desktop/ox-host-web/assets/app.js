@@ -1818,6 +1818,19 @@ $("project-setup-starter").onclick = () => {
 };
 
 let workerResultsKey;
+const linkedWorkerStatuses = new Map([
+  ["preparing", "Preparing checkout"],
+  ["starting", "Starting"],
+  ["running", "Running"],
+  ["waiting_for_operator", "Needs you"],
+  ["returning_result", "Returning changes"],
+  ["completed", "Completed"],
+  ["failed", "Failed"],
+  ["cancelled", "Cancelled"],
+  ["interrupted", "Interrupted"],
+  ["declined", "Declined"],
+  ["detached", "Link unavailable"],
+]);
 function renderWorkerResults(scope, id, row) {
   const list = $("worker-results-list");
   $("project-setup-starter").hidden = Boolean(id) || !detailLink?.ready;
@@ -1836,20 +1849,22 @@ function renderWorkerResults(scope, id, row) {
       findParent(entry)?.key === parentKey &&
       !global.scopes.get(scopeKey(entry.scope))?.detail?.archived?.includes(session.id);
   });
-  const key = JSON.stringify([parentKey, workers.map(entry => [
+  const linked = row?.detail?.linked_workers ?? [];
+  const count = workers.length + linked.length;
+  const key = JSON.stringify([parentKey, linked, workers.map(entry => [
     entry.scope, entry.session.id, entry.session.title, entry.session.status,
     sessionResult(entry.session)?.outcome,
     entry.session.detail?.worker_model, entry.session.detail?.origin?.ceiling
   ])]);
-  $("worker-results").hidden = !workers.length;
-  $("worker-review-starter").hidden = workers.length !== 0 || row?.detail?.origin ||
+  $("worker-results").hidden = !count;
+  $("worker-review-starter").hidden = count !== 0 || row?.detail?.origin ||
     !["codex", "claude"].includes(scope.route.runtime) || !row?.capabilities?.includes("open") ||
     !detailLink?.ready || row?.status === "running" || row?.status === "needs_input" ||
     sessionResult(row)?.outcome !== "completed";
   if (workerResultsKey === key) return;
   workerResultsKey = key;
-  $("worker-results-title").textContent = `Workers (${workers.length})`;
-  list.replaceChildren(...workers.map(entry => {
+  $("worker-results-title").textContent = `Workers (${count})`;
+  const localRows = workers.map(entry => {
     const { session } = entry;
     const status = ({
       running: "Running", needs_input: "Needs you", queued: "Queued",
@@ -1862,7 +1877,23 @@ function renderWorkerResults(scope, id, row) {
     const item = el("div", "worker-result-row");
     item.append(result, el("div", "meta", metadata));
     return item;
-  }));
+  });
+  const linkedRows = linked.map(worker => {
+    const item = el("div", "worker-result-row");
+    const label = `${worker.title || `Worker #${worker.job}`} on ${worker.name}`;
+    const result = button(label, () => phoneSettings.openHosts(() => {
+      page("conversation");
+      repaint();
+      result.focus();
+    }, "← Conversation", worker));
+    const status = linkedWorkerStatuses.get(worker.status) ?? "Status unavailable";
+    const ceiling = ceilingLabels[worker.ceiling];
+    const meta = [status, routesLabel(worker.route), ceiling && `${ceiling} ceiling`, worker.actual_model]
+      .filter(Boolean).join(" · ");
+    item.append(result, el("div", "meta", meta));
+    return item;
+  });
+  list.replaceChildren(...localRows, ...linkedRows);
 }
 
 function conversation() {
