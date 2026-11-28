@@ -1747,6 +1747,10 @@ main:has(#conversation:not([hidden])) {
   color: var(--muted);
   font-size: 0.9em;
 }
+#runtime-setup .actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
 #attached-images .image-chip {
   display: inline-flex;
   align-items: center;
