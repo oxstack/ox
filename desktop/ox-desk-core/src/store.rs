@@ -113,6 +113,7 @@ pub struct Store {
     sender: Option<crate::surface::Sender>,
     memory: Option<crate::memory::MemoryConfig>,
     memory_attachments: HashMap<String, crate::memory::Attachment>,
+    memory_activity: HashMap<String, Vec<crate::memory::Activity>>,
     worker_notice_receipts: Vec<WorkerNoticeReceipt>,
     /// The stamp of each message waiting in `resume_sends`.
     resume_commands: HashMap<String, (crate::codex::request::ThreadCommand, bool)>,
@@ -238,6 +239,7 @@ impl Store {
             sender: None,
             memory: None,
             memory_attachments: HashMap::new(),
+            memory_activity: HashMap::new(),
             worker_notice_receipts: Vec::new(),
             resume_commands: Default::default(),
             resume_senders: Default::default(),

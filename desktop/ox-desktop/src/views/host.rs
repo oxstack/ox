@@ -881,6 +881,15 @@ impl Host {
         self.panes[self.active].update(cx, |p, cx| p.set_front_in(front, window, cx));
         cx.notify();
     }
+    fn show_memory_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.preferences.is_none() {
+            self.show_settings(window, cx);
+        }
+        if let Some(view) = &self.preferences {
+            view.update(cx, |view, cx| view.open_memory(window, cx));
+        }
+    }
+
     /// Open Settings on its Remote access page, or move an open Settings there.
     fn show_remote(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.preferences.is_none() {
@@ -1099,6 +1108,14 @@ impl Host {
                         )
                     });
                 }
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            pane,
+            window,
+            |s, _, _: &super::workbench::OpenMemory, window, cx| {
+                s.show_memory_settings(window, cx);
             },
         )
         .detach();

@@ -17,9 +17,7 @@ fn request(addr: &std::ffi::OsStr, body: Value) -> io::Result<UnixStream> {
     let mut socket = UnixStream::connect(Path::new(addr))?;
     socket.set_read_timeout(Some(Duration::from_secs(4)))?;
     socket.set_write_timeout(Some(Duration::from_secs(4)))?;
-    let body = serde_json::to_vec(&body)?;
-    socket.write_all(&(body.len() as u32).to_be_bytes())?;
-    socket.write_all(&body)?;
+    write_frame(&mut socket, &body)?;
     let mut ack = [0];
     socket.read_exact(&mut ack)?;
     if ack[0] != 1 {
@@ -100,6 +98,45 @@ pub(crate) enum HostLink {
     External {
         socket: std::path::PathBuf,
     },
+}
+
+/// Private reporting channel for one native memory operation. Opening or using
+/// it is best effort so older hosts and terminal agents still use memory.
+pub(crate) struct MemoryReceipt(UnixStream);
+
+impl MemoryReceipt {
+    pub(crate) async fn begin(cwd: &Path, thread: Option<&str>) -> Option<Self> {
+        let lease = own_lease()?;
+        let Some(HostLink::Hosted { addr, scope }) =
+            HostLink::find(cwd, crate::provider::WorkersHost::Never).ok()?
+        else {
+            return None;
+        };
+        let parent = env::var("OX_HOST_WORKER_PARENT")
+            .ok()
+            .or_else(|| thread.map(str::to_owned));
+        tokio::task::spawn_blocking(move || {
+            let socket = request(
+                &addr,
+                json!({"type":"memory_receipt","scope":scope,"parent":parent,"lease":lease}),
+            )
+            .ok()?;
+            Some(Self(socket))
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    pub(crate) fn finish(mut self, receipt: ox_memory::Receipt) {
+        let _ = write_frame(&mut self.0, &receipt);
+    }
+}
+
+fn write_frame(socket: &mut UnixStream, value: &impl serde::Serialize) -> io::Result<()> {
+    let body = serde_json::to_vec(value)?;
+    socket.write_all(&(body.len() as u32).to_be_bytes())?;
+    socket.write_all(&body)
 }
 
 impl HostLink {

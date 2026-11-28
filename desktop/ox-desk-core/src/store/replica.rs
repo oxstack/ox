@@ -844,6 +844,7 @@ impl Store {
         let marks: serde_json::Map<String, Value> = [
             "handed_off_to",
             "handoff_attempts",
+            "memory_activity",
             "yolo_grant",
             "yolo_grant_expires",
             "yolo_children",

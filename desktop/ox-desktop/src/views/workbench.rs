@@ -171,6 +171,9 @@ pub(super) struct OpenOnPhone {
 }
 impl EventEmitter<OpenOnPhone> for Workbench {}
 
+pub(super) struct OpenMemory;
+impl EventEmitter<OpenMemory> for Workbench {}
+
 #[derive(Default)]
 pub(super) struct Stats {
     pub(super) drains: u64,
@@ -1341,6 +1344,47 @@ impl Workbench {
                                         .children(start_worker)
                                         .children(controls),
                                 ),
+                        )
+                        .when_some(
+                            self.store.as_ref().and_then(|store| {
+                                store
+                                    .session_mark(store.selected()?, "memory_activity")?
+                                    .as_array()
+                            }),
+                            |view, activity| {
+                                view.child(
+                                    col()
+                                        .min_w_0()
+                                        .px_3()
+                                        .gap_1()
+                                        .child(
+                                            row()
+                                                .flex_wrap()
+                                                .gap_2()
+                                                .child(crate::small(p, "Recent memory activity"))
+                                                .when(self.link.remote().is_none(), |line| {
+                                                    line.child(crate::kit::button(
+                                                        p,
+                                                        "manage-session-memory",
+                                                        "Manage memory",
+                                                        false,
+                                                        true,
+                                                        cx.listener(|_, _, _, cx| {
+                                                            cx.emit(OpenMemory)
+                                                        }),
+                                                    ))
+                                                }),
+                                        )
+                                        .children(activity.iter().rev().take(3).filter_map(
+                                            |entry| {
+                                                Some(crate::small(
+                                                    p,
+                                                    entry["label"].as_str()?.to_owned(),
+                                                ))
+                                            },
+                                        )),
+                                )
+                            },
                         )
                         .when_some(
                             self.store

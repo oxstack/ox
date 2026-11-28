@@ -218,6 +218,19 @@ impl Store {
         self.changed.mark(Changed::THREADS);
     }
 
+    pub fn restore_memory_activity(&mut self, id: &str, activity: Vec<crate::memory::Activity>) {
+        self.memory_activity.insert(id.to_owned(), activity);
+        self.changed.mark(Changed::THREADS);
+    }
+
+    pub fn record_memory_activity(&mut self, id: &str, activity: crate::memory::Activity) {
+        let recent = self.memory_activity.entry(id.to_owned()).or_default();
+        recent.push(activity);
+        let excess = recent.len().saturating_sub(crate::memory::RECENT_ACTIVITY);
+        recent.drain(..excess);
+        self.changed.mark(Changed::THREADS);
+    }
+
     pub fn new_session(&mut self) {
         if self.remote().is_some() {
             if let Err(e) = self.dispatch_remote(crate::actions::Action::NewDraft) {

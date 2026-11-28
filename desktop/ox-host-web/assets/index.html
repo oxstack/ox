@@ -196,6 +196,13 @@
         </nav>
         <div id="context"></div>
         <h1 id="title"></h1>
+        <section id="memory-activity" aria-label="Recent memory activity" hidden>
+          <div class="memory-activity-header">
+            <span>Recent memory activity</span>
+            <button type="button" id="manage-session-memory">Manage memory</button>
+          </div>
+          <ul aria-live="polite"></ul>
+        </section>
         <div id="confirm-slot" class="confirm-slot" hidden></div>
         <div id="handoff-marks" class="handoff-marks" hidden></div>
         <details id="worker-results" class="worker-results" hidden>

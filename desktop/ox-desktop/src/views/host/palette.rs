@@ -784,12 +784,7 @@ impl Host {
             }
             Target::Memory => {
                 self.close_palette(window, cx);
-                if self.preferences.is_none() {
-                    self.show_settings(window, cx);
-                }
-                if let Some(view) = &self.preferences {
-                    view.update(cx, |view, cx| view.open_memory(window, cx));
-                }
+                self.show_memory_settings(window, cx);
             }
             Target::Refresh => {
                 self.close_palette(window, cx);

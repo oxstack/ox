@@ -312,6 +312,19 @@ $("open-memory").onclick = () => {
   page("settings");
   void phoneSettings.memory(current.scope.project, () => open(current.scope, current.id));
 };
+$("manage-session-memory").onclick = $("open-memory").onclick;
+
+function showMemoryActivity(activity) {
+  const panel = $("memory-activity");
+  const labels = Array.isArray(activity)
+    ? activity.slice(-3).reverse().map((entry) => entry.label).filter((label) => typeof label === "string")
+    : [];
+  panel.hidden = !labels.length;
+  const list = panel.querySelector("ul");
+  const previous = Array.from(list.children, (item) => item.textContent);
+  if (previous.length === labels.length && previous.every((label, i) => label === labels[i])) return;
+  list.replaceChildren(...labels.map((label) => el("li", "", label)));
+}
 
 /** The host took a send and then lost it (a resume that failed after the Ack): its text
  * comes back into the composer once per lost message, before anything typed since, as in
@@ -1949,6 +1962,7 @@ function conversation() {
     $("context").append(el("div", "meta", amount + (memory.from_parent_host
       ? " attached from the parent host" : " attached at session start")));
   }
+  showMemoryActivity(row?.detail?.memory_activity);
   handoffMarks(row);
   renderWorkerResults(scope, id, row);
   if (

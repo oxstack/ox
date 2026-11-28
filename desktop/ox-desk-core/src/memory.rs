@@ -36,6 +36,32 @@ impl Attachment {
     }
 }
 
+/// A hosted memory outcome tied to the native turn that made the call.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Activity {
+    pub turn: String,
+    pub outcome: ox_memory::Receipt,
+}
+
+/// Keep a short audit trail per conversation.
+pub const RECENT_ACTIVITY: usize = 16;
+
+/// Both conversation surfaces use the same labels for the stored outcomes.
+pub fn project_activity(activity: &[Activity]) -> serde_json::Value {
+    serde_json::Value::Array(
+        activity
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "turn": entry.turn,
+                    "outcome": entry.outcome,
+                    "label": entry.outcome.label(),
+                })
+            })
+            .collect(),
+    )
+}
+
 /// Safe sensitivity ceiling for a resolved runtime/billing route.
 ///
 /// Defaults to `Private`. `OX_MEMORY_ALLOW_LOCAL_ONLY=1` allows `LocalOnly` on a

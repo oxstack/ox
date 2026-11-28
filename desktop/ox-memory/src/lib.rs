@@ -154,6 +154,68 @@ impl fmt::Display for Scope {
     }
 }
 
+/// The outcome of an agent's memory call, safe to show with its session.
+/// These variants carry counts and scope categories, without entry data.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Receipt {
+    Recalled { count: u8 },
+    Saved { scope: ScopeKind },
+    Updated { scope: ScopeKind },
+    Deduplicated { scope: ScopeKind },
+    Forgotten { scope: ScopeKind },
+}
+
+impl Receipt {
+    pub fn label(self) -> String {
+        match self {
+            Self::Recalled { count: 0 } => "No eligible memories found".into(),
+            Self::Recalled { count: 1 } => "Recalled 1 memory".into(),
+            Self::Recalled { count } => format!("Recalled {count} memories"),
+            Self::Saved { scope } => format!("Saved a {} memory", scope.label()),
+            Self::Updated { scope } => format!("Updated a {} memory", scope.label()),
+            Self::Deduplicated { scope } => format!("{} already saved", scope.memory_label()),
+            Self::Forgotten { scope } => format!("Forgot a {} memory", scope.label()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeKind {
+    Global,
+    Project,
+    Host,
+}
+
+impl ScopeKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Project => "project",
+            Self::Host => "host",
+        }
+    }
+
+    fn memory_label(self) -> &'static str {
+        match self {
+            Self::Global => "Global memory",
+            Self::Project => "Project memory",
+            Self::Host => "Host memory",
+        }
+    }
+}
+
+impl From<&Scope> for ScopeKind {
+    fn from(scope: &Scope) -> Self {
+        match scope {
+            Scope::Global => Self::Global,
+            Scope::Project(_) => Self::Project,
+            Scope::Host(_) => Self::Host,
+        }
+    }
+}
+
 /// A single atomic memory record.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MemoryEntry {
