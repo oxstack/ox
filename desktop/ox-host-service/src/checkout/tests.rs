@@ -376,6 +376,26 @@ fn materialized_lfs_changes_arrive_offline_and_keep_their_pointer_on_git_add() {
 }
 
 #[test]
+fn moved_checkouts_pass_untracked_files_to_the_next_checkout() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("original");
+    repo(&source);
+    fs::write(source.join("kept.txt"), "include this in each move").unwrap();
+    let snapshot = Snapshot::capture(temp.path(), &source, &[]).unwrap();
+    let studio = receive_move(temp.path(), 1, snapshot.open().unwrap(), &snapshot.commit).unwrap();
+    assert_eq!(
+        run(git(&studio).args(["ls-files", "--others", "--exclude-standard"])).unwrap(),
+        b"kept.txt\n"
+    );
+    let snapshot = Snapshot::capture(temp.path(), &studio, &[]).unwrap();
+    let office = receive_move(temp.path(), 2, snapshot.open().unwrap(), &snapshot.commit).unwrap();
+    assert_eq!(
+        fs::read_to_string(office.join("kept.txt")).unwrap(),
+        "include this in each move"
+    );
+}
+
+#[test]
 fn an_unborn_repo_and_ignored_only_project_can_open_an_empty_worker_checkout() {
     let tmp = tempfile::tempdir().unwrap();
     let source = tmp.path().join("repo");

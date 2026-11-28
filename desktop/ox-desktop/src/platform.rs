@@ -7,6 +7,7 @@ pub(crate) use host_client::{
     CatalogEvent, CatalogWatch, HOST_NOT_RUNNING, HostLink, IdleReservation, ProcessMonitor,
     clean_handoff_pairings, reserve_idle_update,
 };
+pub(crate) use host_client::{MoveDestination, MovePhase, MoveStatus};
 pub mod onboarding;
 pub(crate) mod remote;
 pub mod versions;

@@ -79,3 +79,12 @@ pub fn origin(input: &str) -> Option<String> {
         && input.trim_end_matches('/') == u.origin().ascii_serialization())
     .then(|| u.origin().ascii_serialization())
 }
+
+pub fn session_url(input: &str, thread: &str) -> Option<String> {
+    let mut url = url::Url::parse(&origin(input)?).ok()?;
+    let fragment = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("thread", thread)
+        .finish();
+    url.set_fragment(Some(&fragment));
+    Some(url.into())
+}

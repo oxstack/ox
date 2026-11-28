@@ -1026,6 +1026,24 @@ impl Engine {
             limit,
             ancestor: None,
         };
+        match self.read_moved_history(&scope, &owner, host.as_deref(), session.as_deref()) {
+            Ok(Some((source, items))) => {
+                return self.answer(
+                    reply,
+                    read_source_items(
+                        &source,
+                        items,
+                        &ReadArgs {
+                            item: page.item,
+                            after: page.after,
+                            limit: page.limit.unwrap_or(20).clamp(1, 100) as usize,
+                        },
+                    ),
+                );
+            }
+            Ok(None) => {}
+            Err(error) => return self.answer(reply, Err(error.to_string())),
+        }
         self.read_history_of(
             &scope,
             &owner,
@@ -1291,6 +1309,14 @@ fn read_source_page(
     if frozen {
         freeze(&mut items, src)?;
     }
+    read_source_items(src, items, args)
+}
+
+fn read_source_items(
+    src: &HandoffSource,
+    items: Vec<handoff::SourceItem>,
+    args: &ReadArgs,
+) -> Result<Value, String> {
     let view = |i: &handoff::SourceItem| {
         json!({
             "id": i.id,

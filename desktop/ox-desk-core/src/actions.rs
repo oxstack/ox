@@ -36,6 +36,17 @@ pub enum Target {
     NativeCli,
     Terminal,
 }
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MoveSession {
+    pub thread: String,
+    pub destination: String,
+    pub operation: String,
+    pub after_turn: bool,
+}
+
 macro_rules! actions {
     ($($name:ident $(($($arg:ty),+))? => $target:expr),+ $(,)?) => {
         #[derive(Clone,Debug,serde::Serialize,serde::Deserialize)]
@@ -69,6 +80,10 @@ actions! {
     PaletteCommand(Option<String>,String)=>Target::Runtime(Operation::PaletteCommand),
     StartWorker(crate::origin::WorkerStart)=>Target::Host,
     StartHandoff(crate::handoff::HandoffStart)=>Target::Host,
+    MoveSession(MoveSession)=>Target::Host,
+    CancelMove(String)=>Target::Host,
+    CheckMove(String)=>Target::Host,
+    RetryMove(String)=>Target::Host,
     YoloGrant(String,bool)=>Target::Host,
     InjectHandoff(String,Vec<serde_json::Value>)=>Target::Runtime(Operation::Submit),
     DismissNotice=>Target::Local,
@@ -149,6 +164,14 @@ impl Store {
             Action::StartWorker(_) | Action::StartHandoff(_) | Action::YoloGrant(..) => {
                 return Err(io::Error::other(
                     "Workers and handoffs start through the OX session host.",
+                ));
+            }
+            Action::MoveSession(_)
+            | Action::CancelMove(_)
+            | Action::CheckMove(_)
+            | Action::RetryMove(_) => {
+                return Err(io::Error::other(
+                    "Session moves require the OX session host.",
                 ));
             }
             Action::InjectHandoff(text, items) => self.start_handoff(text, items)?,

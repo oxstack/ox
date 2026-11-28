@@ -7,6 +7,7 @@ const files = [
   "/activity.js",
   "/model.js",
   "/controls.js",
+  "/move-controls.js",
   "/sky.js",
   "/settings.js",
   "/settings.css",

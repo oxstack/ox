@@ -298,6 +298,9 @@ impl Engine {
     }
 
     fn deliver_worker_notice(&mut self, n: &Notice) -> io::Result<bool> {
+        if !self.can_deliver_move_worker_notice(&n.scope, &n.session)? {
+            return Ok(false);
+        }
         let update_reserved = self.update_reserved();
         let Some(live) = self.running.get_mut(&n.scope) else {
             return Ok(false);

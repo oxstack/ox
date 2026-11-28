@@ -24,6 +24,12 @@ use std::{
 };
 use tokio::sync::watch;
 
+// The receiving move actor will use this alongside the signed worker transport.
+#[allow(dead_code)]
+pub(crate) mod move_admission;
+#[allow(dead_code)]
+pub(crate) mod move_staging;
+
 /// A paired device that is not used for this long is forgotten.
 pub(crate) const INACTIVE: i64 = 30 * 24 * 3600;
 /// Lifetime of a single-use pairing invitation.
@@ -754,6 +760,7 @@ impl State {
             // separate opt-in the receiving host grants after pairing.
             may_launch: true,
             may_sync_memory: false,
+            may_accept_moves: false,
             ceiling: ox_desk_core::modes::Level::Yolo,
         };
         // A replacement key keeps restrictions the receiver already set for
@@ -859,6 +866,7 @@ impl State {
         may_launch: bool,
         ceiling: ox_desk_core::modes::Level,
         may_sync_memory: Option<bool>,
+        may_accept_moves: Option<bool>,
     ) -> io::Result<()> {
         let mut grant = self
             .worker_grant(id)
@@ -874,6 +882,9 @@ impl State {
         grant.ceiling = ceiling;
         if let Some(allowed) = may_sync_memory {
             grant.may_sync_memory = allowed;
+        }
+        if let Some(allowed) = may_accept_moves {
+            grant.may_accept_moves = allowed;
         }
         self.update(|disk| disk.devices.get_mut(id).unwrap().device.worker = Some(grant))?;
         self.signal();
@@ -1558,19 +1569,19 @@ mod tests {
             "memory sync needs an explicit receiver-side grant"
         );
         state
-            .edit_worker(&id, &original, true, Level::Yolo, Some(true))
+            .edit_worker(&id, &original, true, Level::Yolo, Some(true), None)
             .unwrap();
         let granted = state.worker_grant(&id).unwrap().clone();
         assert!(granted.may_sync_memory && granted.may_launch);
         // `None` leaves the memory grant alone while other access changes.
         state
-            .edit_worker(&id, &granted, false, Level::Read, None)
+            .edit_worker(&id, &granted, false, Level::Read, None, None)
             .unwrap();
         let restricted = state.worker_grant(&id).unwrap().clone();
         assert!(restricted.may_sync_memory && !restricted.may_launch);
         assert!(
             state
-                .edit_worker(&id, &original, true, Level::Yolo, None)
+                .edit_worker(&id, &original, true, Level::Yolo, None, None)
                 .is_err()
         );
         let stored: serde_json::Value =

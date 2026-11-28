@@ -1,6 +1,6 @@
 //! An initialized submodule is a separate working repository. Transfer its
 //! local state from disk without fetching from the source's .gitmodules URL.
-use super::{Snapshot, Untracked, files, git, git_path, object, oid, receive_inner, run};
+use super::{Purpose, Snapshot, Untracked, files, git, git_path, object, oid, receive_inner, run};
 use std::{
     collections::BTreeMap,
     ffi::OsStr,
@@ -122,6 +122,7 @@ pub(super) fn unpack(
     job: u64,
     input: &mut impl Read,
     depth: usize,
+    purpose: Purpose,
 ) -> io::Result<Vec<(PathBuf, PathBuf)>> {
     let tree = files::Tree::open(root)?;
     let mut links = gitlinks(&mut git(root))?;
@@ -141,7 +142,7 @@ pub(super) fn unpack(
         let mut child = input.take(u64::from_be_bytes(size));
         let staging = staging.join(format!("module-{}", prepared.len()));
         fs::create_dir(&staging)?;
-        let checkout = receive_inner(&staging, job, None, &mut child, depth + 1, None)?;
+        let checkout = receive_inner(&staging, job, None, &mut child, depth + 1, None, purpose)?;
         if child.limit() != 0
             || checkout != staging.join(job.to_string())
             || object(&checkout, "HEAD")? != expected

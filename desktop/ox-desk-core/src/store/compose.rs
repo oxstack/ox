@@ -301,6 +301,7 @@ impl Store {
             && id.is_none_or(|thread| !self.changing_options(thread))
             && id.is_none_or(|id| {
                 !self.in_terminal(id)
+                    && !self.moving_threads.contains(id)
                     && !self.is_native_live(id)
                     && self
                         .transcripts
@@ -318,6 +319,7 @@ impl Store {
     pub(super) fn can_resume_send(&self, id: &str) -> bool {
         self.remote().is_none()
             && self.ended_threads.contains(id)
+            && !self.moving_threads.contains(id)
             && !self.is_native_live(id)
             && matches!(self.state, Connection::Ready | Connection::Connecting)
             && !self.has_live_session(id)

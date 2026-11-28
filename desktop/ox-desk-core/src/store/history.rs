@@ -142,6 +142,9 @@ impl Store {
         self.open_catalog_alias(id, false)
     }
     fn open_catalog_alias(&mut self, id: &str, confirm_alias: bool) -> io::Result<()> {
+        if self.moving_threads.contains(id) {
+            return Err(io::Error::other("This session is moving to another host."));
+        }
         self.selection += 1;
         self.selected = Some(id.into());
         let entry = self.transcripts.entry(id.into()).or_default();

@@ -1,5 +1,5 @@
 use super::connection::{Connection, IDLE};
-use super::{CHUNK, Checkout, Delivery, Receipt, Reply, Request};
+use super::{ArchiveChunks, CHUNK, Checkout, Delivery, Receipt, Reply, Request};
 use crate::{
     inventory,
     paired_hosts::valid_id,
@@ -13,12 +13,8 @@ use axum::{
 };
 use ox_host_service::checkout::{Mirror, check_archive_space, receive_commit};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{fs, io, os::unix::ffi::OsStrExt, path::Path, sync::Arc, time::Duration};
-use tokio::{
-    io::{AsyncSeekExt, AsyncWriteExt},
-    time::timeout,
-};
+use tokio::{io::AsyncSeekExt, time::timeout};
 
 type WebSocket = Connection<Message>;
 
@@ -272,20 +268,14 @@ async fn install(
     let file = tempfile::tempfile_in(stage.path())?;
     check_archive_space(&file, bytes)?;
     let mut archive = tokio::fs::File::from_std(file);
-    let mut remaining = bytes;
-    let mut hash = Sha256::new();
-    while remaining != 0 {
+    let mut chunks = ArchiveChunks::new(bytes);
+    while !chunks.complete() {
         let Message::Binary(chunk) = timeout(IDLE, socket.next()).await?? else {
             return Err(io::Error::other("Incomplete checkout archive."));
         };
-        remaining = remaining
-            .checked_sub(chunk.len() as u64)
-            .filter(|_| !chunk.is_empty())
-            .ok_or_else(|| io::Error::other("Invalid checkout chunk length."))?;
-        archive.write_all(&chunk).await?;
-        hash.update(&chunk);
+        chunks.write(&mut archive, &chunk).await?;
     }
-    let sha256 = format!("{:x}", hash.finalize());
+    let sha256 = format!("{:x}", chunks.digest());
     if !matches!(control(socket).await?, Request::Finish {sha256: claimed} if claimed == sha256) {
         return Err(io::Error::other("Checkout archive checksum differs."));
     }

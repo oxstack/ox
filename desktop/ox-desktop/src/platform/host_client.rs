@@ -765,8 +765,10 @@ impl HostLink {
 }
 mod catalog;
 mod history;
+mod session_moves;
 pub(crate) use catalog::{CatalogEvent, CatalogWatch};
 pub(crate) use history::clean_handoff_pairings;
+pub(crate) use session_moves::{MoveDestination, MovePhase, MoveStatus};
 
 #[cfg(test)]
 mod process_monitor_tests {

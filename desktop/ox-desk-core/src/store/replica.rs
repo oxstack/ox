@@ -136,6 +136,10 @@ impl Store {
     pub fn is_host_client(&self) -> bool {
         self.remote().is_some()
     }
+    pub fn can_move_session(&self, id: &str) -> bool {
+        self.remote()
+            .is_some_and(|remote| remote.can(id, "move_session"))
+    }
     pub(crate) fn remote(&self) -> Option<&Remote> {
         if let Link::Host(r) = &self.link {
             Some(r)
@@ -849,6 +853,7 @@ impl Store {
             "yolo_children",
             "worker_model",
             "memory_attachment",
+            "move",
         ]
         .into_iter()
         .filter_map(|k| Some((k.to_owned(), data.get(k)?.clone())))

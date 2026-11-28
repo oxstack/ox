@@ -40,6 +40,7 @@ fn paired_phone() -> (tempfile::TempDir, App, String, Subscription) {
     let (id, sub) = register_phone(&mut state);
     let app = App {
         jobs: None,
+        moves: None,
         state: Arc::new(std::sync::Mutex::new(state)),
         host: Arc::new(dir.path().join("unused.sock")),
         slots: Arc::new(tokio::sync::Semaphore::new(1)),

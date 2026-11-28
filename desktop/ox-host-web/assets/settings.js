@@ -151,7 +151,7 @@ function fields(parent, specs, base = {}, isNew = false) {
   return { inputs, changes };
 }
 
-function registeredHostOrigin(value) {
+export function registeredHostOrigin(value) {
   try {
     const url = new URL(value);
     if (
@@ -1373,8 +1373,14 @@ export function setupSettings({ request, open, close, pushStatus, enablePush, lo
       const sync = node("input"); sync.type = "checkbox"; sync.checked = device.worker.may_sync_memory === true;
       const synced = node("label"); synced.append(sync, document.createTextNode(" Allow memory sync"));
       card.append(allowed, limit, synced);
+      const moves = node("input"); moves.type = "checkbox"; moves.checked = device.worker.may_accept_moves === true;
+      if (outbound.supports_session_moves) {
+        const label = node("label"); label.append(moves, document.createTextNode(" Accept session moves"));
+        card.append(label, node("p", "Let this host send a conversation and its working files here when you move a session."));
+      }
       submit(card, "Save worker access", async () => {
-        await request({action: "edit_worker_link", id: device.id, before: device.worker, may_launch: allow.checked, ceiling: ceiling.value, may_sync_memory: sync.checked});
+        await request({action: "edit_worker_link", id: device.id, before: device.worker, may_launch: allow.checked, ceiling: ceiling.value, may_sync_memory: sync.checked,
+          ...(outbound.supports_session_moves ? {may_accept_moves: moves.checked} : {})});
         if (pageId === id && !panel.hidden) { await show(); status.textContent = "Saved on this host."; }
       });
       body.append(card, action("Revoke " + device.label, async () => {

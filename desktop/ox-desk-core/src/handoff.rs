@@ -440,6 +440,22 @@ pub fn select(
             MAX_REQUEST / 1024
         ));
     }
+    select_history(items, request, window)
+}
+
+/// Reserve portable context before the operator sends the next turn.
+pub fn select_for_continuation(
+    items: &[SourceItem],
+    window: Option<u64>,
+) -> Result<Selection, String> {
+    select_history(items, "", window)
+}
+
+fn select_history(
+    items: &[SourceItem],
+    request: &str,
+    window: Option<u64>,
+) -> Result<Selection, String> {
     let budget = Budget::new(window, request);
     let request_alone = Budget::new(window, "");
     if request_alone.available < tokens(request) {

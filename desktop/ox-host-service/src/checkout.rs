@@ -103,6 +103,17 @@ fn object(dir: &Path, name: &str) -> io::Result<String> {
     let id = line(run(git(dir).args(["rev-parse", "--verify", name]))?)?;
     Ok(oid(id.as_bytes())?.to_owned())
 }
+/// Canonical repository root and the project path captured inside it.
+pub fn project_location(project: &Path) -> io::Result<(PathBuf, PathBuf)> {
+    let root = git_path(project, &["rev-parse", "--show-toplevel"])?;
+    let relative = project
+        .canonicalize()?
+        .strip_prefix(&root)
+        .map_err(|_| io::Error::other("Project moved outside its repository"))?
+        .to_owned();
+    Ok((root, relative))
+}
+
 fn head(repo: &Path) -> io::Result<Option<String>> {
     let out = git(repo)
         .args(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
@@ -191,12 +202,7 @@ impl Snapshot {
         returning: Option<results::Inputs<'_>>,
     ) -> io::Result<Self> {
         submodules::check_depth(depth)?;
-        let root = git_path(project, &["rev-parse", "--show-toplevel"])?;
-        let relative = project
-            .canonicalize()?
-            .strip_prefix(&root)
-            .map_err(|_| io::Error::other("Project moved outside its repository"))?
-            .to_owned();
+        let (root, relative) = project_location(project)?;
         let base = head(&root)?;
         let index = git_path(
             &root,
@@ -439,7 +445,15 @@ pub fn check_archive_space(file: &File, bytes: u64) -> io::Result<()> {
 /// Install into a fresh, owner-controlled job directory on the same device as
 /// `jobs`. Only a fully prepared worktree is made visible at the final job path.
 pub fn receive(jobs: &Path, job: u64, mirror: &Path, mut input: impl Read) -> io::Result<PathBuf> {
-    receive_inner(jobs, job, Some(mirror), &mut input, 0, None)
+    receive_inner(
+        jobs,
+        job,
+        Some(mirror),
+        &mut input,
+        0,
+        None,
+        Purpose::Worker,
+    )
 }
 
 /// Receive an archive only if its embedded commit matches the announced snapshot.
@@ -450,7 +464,15 @@ pub fn receive_commit(
     mut input: impl Read,
     commit: &str,
 ) -> io::Result<PathBuf> {
-    receive_inner(jobs, job, Some(mirror), &mut input, 0, Some(commit))
+    receive_inner(
+        jobs,
+        job,
+        Some(mirror),
+        &mut input,
+        0,
+        Some(commit),
+        Purpose::Worker,
+    )
 }
 
 /// A result archive includes its own base history and never contacts an upstream.
@@ -460,7 +482,27 @@ pub fn receive_result(
     mut input: impl Read,
     tip: &str,
 ) -> io::Result<PathBuf> {
-    receive_inner(jobs, job, None, &mut input, 0, Some(tip))
+    receive_inner(jobs, job, None, &mut input, 0, Some(tip), Purpose::Worker)
+}
+
+/// A moved session continues working on the copied files. Leave its untracked
+/// files visible as ordinary Git inputs, including on later moves.
+pub fn receive_move(jobs: &Path, job: u64, mut input: impl Read, tip: &str) -> io::Result<PathBuf> {
+    receive_inner(
+        jobs,
+        job,
+        None,
+        &mut input,
+        0,
+        Some(tip),
+        Purpose::SessionMove,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Purpose {
+    Worker,
+    SessionMove,
 }
 
 fn receive_inner(
@@ -470,6 +512,7 @@ fn receive_inner(
     mut input: &mut dyn Read,
     depth: usize,
     expected: Option<&str>,
+    purpose: Purpose,
 ) -> io::Result<PathBuf> {
     submodules::check_depth(depth)?;
     let mut magic = [0; MAGIC.len()];
@@ -548,8 +591,8 @@ fn receive_inner(
         fs::remove_file(alternates)?;
     }
     lfs::unpack(&work, &mut input)?;
-    let modules = submodules::unpack(&work, stage.path(), job, &mut input, depth)?;
-    files::unpack(&work, &mut input)?;
+    let modules = submodules::unpack(&work, stage.path(), job, &mut input, depth, purpose)?;
+    files::unpack(&work, &mut input, purpose == Purpose::Worker)?;
     for (prepared, path) in modules {
         // rename accepts an empty directory and fails on any transferred
         // parent-level inputs that would collide with the populated module.

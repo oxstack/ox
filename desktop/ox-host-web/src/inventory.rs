@@ -38,6 +38,8 @@ pub(crate) struct Inventory {
     /// hosts reject unknown fields, so the parent must not send them blindly.
     #[serde(default)]
     memory_brief: bool,
+    #[serde(default)]
+    supports_session_moves: bool,
     has_project: Option<bool>,
 }
 // A newer host may also run an agent or billing route this client cannot launch.
@@ -162,6 +164,7 @@ async fn sample(app: &App) -> io::Result<(Inventory, HashSet<String>)> {
             linked_read: supports("linked_read_workers"),
             linked_write: supports("linked_write_workers"),
             memory_brief: supports("worker_memory_brief"),
+            supports_session_moves: app.moves.is_some(),
         },
         projects,
     ))

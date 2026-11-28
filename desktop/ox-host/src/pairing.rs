@@ -365,6 +365,7 @@ pub fn memory_sync(paths: &Paths, id: &str, enabled: bool) -> Result<(), String>
             ceiling: grant.ceiling,
             before: grant,
             may_sync_memory: Some(enabled),
+            may_accept_moves: None,
         },
     )
     .map_err(|e| e.to_string())?;

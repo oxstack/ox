@@ -5,8 +5,50 @@ pub(crate) mod receiver;
 mod sender;
 pub use sender::{Sender, transfer};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256, digest::Output};
+use std::io;
+use tokio::io::AsyncWriteExt;
 
-const CHUNK: usize = 256 * 1024;
+pub(crate) const CHUNK: usize = 256 * 1024;
+
+pub(crate) struct ArchiveChunks {
+    remaining: u64,
+    hash: Sha256,
+}
+
+impl ArchiveChunks {
+    pub(crate) fn new(bytes: u64) -> Self {
+        Self {
+            remaining: bytes,
+            hash: Sha256::new(),
+        }
+    }
+
+    pub(crate) fn complete(&self) -> bool {
+        self.remaining == 0
+    }
+
+    pub(crate) async fn write(
+        &mut self,
+        file: &mut tokio::fs::File,
+        chunk: &[u8],
+    ) -> io::Result<()> {
+        self.remaining = self
+            .remaining
+            .checked_sub(chunk.len() as u64)
+            .filter(|_| !chunk.is_empty() && chunk.len() <= CHUNK)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "Invalid archive chunk length")
+            })?;
+        file.write_all(chunk).await?;
+        self.hash.update(chunk);
+        Ok(())
+    }
+
+    pub(crate) fn digest(self) -> Output<Sha256> {
+        self.hash.finalize()
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

@@ -302,6 +302,54 @@
         {
           "additionalProperties": false,
           "properties": {
+            "move_session": {
+              "$ref": "#/$defs/MoveSession"
+            }
+          },
+          "required": [
+            "move_session"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cancel_move": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "cancel_move"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "check_move": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "check_move"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "retry_move": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "retry_move"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
             "yolo_grant": {
               "maxItems": 2,
               "minItems": 2,
@@ -2039,6 +2087,30 @@
           "type": "object"
         }
       ]
+    },
+    "MoveSession": {
+      "additionalProperties": false,
+      "properties": {
+        "after_turn": {
+          "type": "boolean"
+        },
+        "destination": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "thread": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "thread",
+        "destination",
+        "operation",
+        "after_turn"
+      ],
+      "type": "object"
     },
     "NotificationKind": {
       "enum": [

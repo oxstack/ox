@@ -46,12 +46,32 @@ impl Store {
         {
             return Ok(());
         }
+        if matches!(&data, Data::Stock(pipe::Event::Closed { .. }))
+            && let Some(reaped) = self
+                .claude_mut()
+                .sessions
+                .get_mut(&owner)
+                .and_then(|process| process.move_release.take())
+        {
+            let result = if reaped.confirmed() {
+                self.claude_end(&owner).map_err(|error| error.to_string())
+            } else {
+                let reason = "Could not confirm that Claude Code's process was reaped.".to_owned();
+                self.claude_closed(&owner, reason.clone());
+                Err(reason)
+            };
+            self.complete_move_writer_release(&owner, result);
+            return Ok(());
+        }
         let outcome = match data {
             Data::Failed(reason) | Data::Stock(pipe::Event::Closed { reason }) => {
                 self.claude_closed(&owner, reason);
                 Ok(())
             }
             Data::Stock(pipe::Event::SignInRequired) => {
+                if self.claude().sessions[&owner].move_release.is_some() {
+                    return Ok(()); // Wait for the process-reap result, which follows the sign-in event.
+                }
                 if self.profile.route.billing == Billing::Subscription {
                     self.claude_mut()
                         .sessions
@@ -138,6 +158,9 @@ impl Store {
         let Some(mut p) = self.claude_mut().sessions.remove(owner) else {
             return;
         };
+        if p.move_release.is_some() {
+            self.complete_move_writer_release(owner, Err(reason.clone()));
+        }
         if p.deferred_command.as_ref().is_some_and(|c| c.new_thread)
             && let Some((_, command)) = &p.first
         {
@@ -930,6 +953,111 @@ mod tests {
             .unwrap()
             .pop()
             .unwrap()
+    }
+
+    #[test]
+    fn move_release_reaps_only_the_selected_claude_process() {
+        use crate::store::MoveWriterRelease;
+        use std::{sync::mpsc, time::Duration};
+        let (mut s, a, b) = fixture();
+        let root = tempfile::tempdir().unwrap();
+        s.profile.project = root.path().to_owned();
+        std::fs::write(
+            root.path().join("initialize.response"),
+            format!(
+                "{}\n",
+                json!({
+                    "type":"control_response","response":{
+                        "subtype":"success","request_id":"ox-init","response":{
+                            "claude_code_version":pipe::minimum(),
+                            "account":{"apiProvider":"firstParty","subscriptionType":"Claude Max"},
+                            "commands":[],"models":[]
+                        }
+                    }
+                })
+            ),
+        )
+        .unwrap();
+        let (tx, rx) = mpsc::channel();
+        for owner in [&a, &b] {
+            let sender = tx.clone();
+            let id = owner.to_owned();
+            let link = pipe::Link::spawn(
+                pipe::Launch {
+                    ox: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude-link.sh"),
+                    path: "/usr/bin:/bin".into(),
+                    project: root.path().into(),
+                    billing: Billing::Subscription,
+                    session: pipe::Session::New(stock_id(owner).unwrap().to_owned()),
+                    permission_mode: None,
+                    contract: None,
+                    model: None,
+                },
+                move |event| {
+                    let _ = sender.send((id.clone(), event));
+                },
+            )
+            .unwrap();
+            update(&mut s, owner, 2, Data::Connected(link)).unwrap();
+        }
+        for _ in 0..2 {
+            let (owner, event) = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(matches!(
+                event,
+                pipe::Event::Frame(wire::Event::ControlReply(_))
+            ));
+            update(&mut s, &owner, 2, Data::Stock(event)).unwrap();
+        }
+        let other = s.claude().sessions[&b].link.as_ref().unwrap().reap_status();
+        s.transcripts.get_mut(&b).unwrap().active_turn = Some("independent-turn".into());
+        let child = format!("{a}/subagent");
+        s.transcripts.entry(child.clone()).or_default().active_turn = Some("child-turn".into());
+        assert!(s.release_writer_for_move(&a).is_err());
+        assert!(s.can_send(Some(&a)));
+        s.transcripts.get_mut(&child).unwrap().active_turn = None;
+
+        s.release_writer_for_move(&a).unwrap();
+        s.release_writer_for_move(&a).unwrap();
+        assert!(s.take_move_writer_releases().is_empty());
+        assert!(!s.can_send(Some(&a)));
+        let (owner, event) = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(owner, a);
+        assert!(matches!(event, pipe::Event::Closed { .. }));
+        update(&mut s, &owner, 2, Data::Stock(event)).unwrap();
+        assert_eq!(
+            s.take_move_writer_releases(),
+            [MoveWriterRelease {
+                thread: a.clone(),
+                result: Ok(())
+            }]
+        );
+        assert!(!s.has_live_session(&a));
+        assert_eq!(
+            s.transcript(&b).unwrap().active_turn(),
+            Some("independent-turn")
+        );
+        assert!(s.has_live_session(&b));
+        assert!(!other.confirmed());
+        assert!(s.take_handoff().is_none());
+    }
+
+    #[test]
+    fn a_stale_or_unverified_claude_close_cannot_confirm_release() {
+        let (mut s, a, b) = fixture();
+        s.claude_mut().sessions.get_mut(&a).unwrap().move_release = Some(Default::default());
+        let closed = || {
+            Data::Stock(pipe::Event::Closed {
+                reason: "Exited".into(),
+            })
+        };
+        update(&mut s, &a, 1, closed()).unwrap();
+        assert!(s.take_move_writer_releases().is_empty());
+        update(&mut s, &a, 2, closed()).unwrap();
+        let result = s.take_move_writer_releases();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].thread, a);
+        assert!(result[0].result.is_err());
+        assert!(s.has_live_session(&b));
     }
 
     #[test]

@@ -17,6 +17,8 @@ pub(super) struct Directory {
     hosts: Vec<Target>,
     available: Vec<Target>,
     incoming: Vec<admin::Device>,
+    #[serde(default)]
+    supports_session_moves: bool,
 }
 
 fn local(request: admin::Request) -> io::Result<admin::Reply> {
@@ -86,16 +88,27 @@ impl Hosts {
         &mut self,
         id: String,
         before: WorkerGrant,
-        may_launch: bool,
-        ceiling: Level,
-        may_sync_memory: bool,
+        after: WorkerGrant,
         cx: &mut Context<Self>,
     ) {
         let selected = self.selected.clone();
         self.work(cx, move || {
+            let may_accept_moves = (before.may_accept_moves != after.may_accept_moves)
+                .then_some(after.may_accept_moves);
             match selected.as_ref() {
-                Some(host) => { host.settings(json!({"action":"edit_worker_link", "id":id, "before":before, "may_launch":may_launch, "ceiling":ceiling, "may_sync_memory":may_sync_memory}))?; },
-                None => { local(admin::Request::WorkerAccess { id, before, may_launch, ceiling, may_sync_memory: Some(may_sync_memory) })?; },
+                Some(host) => {
+                    let mut edit = json!({"action":"edit_worker_link", "id":id, "before":before, "may_launch":after.may_launch, "ceiling":after.ceiling, "may_sync_memory":after.may_sync_memory});
+                    if let Some(enabled) = may_accept_moves {
+                        edit["may_accept_moves"] = enabled.into();
+                    }
+                    host.settings(edit)?;
+                },
+                None => {
+                    local(admin::Request::WorkerAccess {
+                        id, before, may_launch: after.may_launch, ceiling: after.ceiling,
+                        may_sync_memory: Some(after.may_sync_memory), may_accept_moves,
+                    })?;
+                },
             }
             directory(selected.as_ref())
         }, |s, links, _| { s.links = Some(links); });
@@ -234,13 +247,30 @@ impl Hosts {
                     s.worker_access(
                         id.clone(),
                         grant.clone(),
-                        !grant.may_launch,
-                        grant.ceiling,
-                        grant.may_sync_memory,
+                        WorkerGrant {
+                            may_launch: !grant.may_launch,
+                            ..grant.clone()
+                        },
                         cx,
                     )
                 }),
             ));
+            if links.supports_session_moves {
+                let id = incoming.id.clone();
+                let grant = before.clone();
+                section = section.child(button(
+                    p,
+                    ("worker-accept-moves", i),
+                    if grant.may_accept_moves { "Accept session moves · On" } else { "Accept session moves · Off" },
+                    grant.may_accept_moves,
+                    !self.busy,
+                    cx.listener(move |s, _, _, cx| {
+                        s.worker_access(id.clone(), grant.clone(), WorkerGrant {
+                            may_accept_moves: !grant.may_accept_moves, ..grant.clone()
+                        }, cx)
+                    }),
+                ).tooltip("Let this host send a conversation and its working files here when you move a session."));
+            }
             let id = incoming.id.clone();
             let grant = before.clone();
             section = section.child(button(
@@ -257,9 +287,10 @@ impl Hosts {
                     s.worker_access(
                         id.clone(),
                         grant.clone(),
-                        grant.may_launch,
-                        grant.ceiling,
-                        !grant.may_sync_memory,
+                        WorkerGrant {
+                            may_sync_memory: !grant.may_sync_memory,
+                            ..grant.clone()
+                        },
                         cx,
                     )
                 }),
@@ -283,9 +314,10 @@ impl Hosts {
                         s.worker_access(
                             id.clone(),
                             before.clone(),
-                            before.may_launch,
-                            level,
-                            before.may_sync_memory,
+                            WorkerGrant {
+                                ceiling: level,
+                                ..before.clone()
+                            },
                             cx,
                         )
                     }),

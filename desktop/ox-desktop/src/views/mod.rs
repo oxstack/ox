@@ -3,6 +3,7 @@ mod compose;
 mod handoff_sheet;
 pub mod host;
 mod onboarding;
+mod session_move;
 mod terminal_review;
 mod transcript;
 pub mod workbench;

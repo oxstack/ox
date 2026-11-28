@@ -63,6 +63,7 @@ struct Process {
     generation: u64,
     events: events::EventState,
     handoff: Option<super::commands::Handoff>,
+    move_release: Option<pipe::ReapStatus>,
     link: Option<pipe::Link>,
     initialized: bool,
     limit_reporter: Option<crate::usage::reported::Reporter>,
@@ -526,6 +527,49 @@ impl Store {
         p.link.take();
         Ok(())
     }
+    pub(super) fn claude_move_writer_group(&self, id: &str) -> Option<u32> {
+        self.claude()
+            .sessions
+            .get(id)?
+            .link
+            .as_ref()
+            .map(|link| link.process_group())
+    }
+
+    pub(super) fn release_claude_writer_for_move(&mut self, id: &str) -> io::Result<()> {
+        if self.transcripts.keys().any(|child| {
+            child
+                .strip_prefix(id)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+                && self.thread_busy(child)
+        }) {
+            return Err(io::Error::other(
+                "Wait for this session's Claude subagents to finish.",
+            ));
+        }
+        let p = self
+            .claude_mut()
+            .sessions
+            .get_mut(id)
+            .filter(|p| p.initialized && p.viewer.is_none() && p.handoff.is_none())
+            .ok_or_else(|| {
+                io::Error::other("This Claude session does not have an owned writer.")
+            })?;
+        if p.move_release.is_some() {
+            return Ok(());
+        }
+        if !p.controls.is_empty() || p.first.is_some() || p.deferred_command.is_some() {
+            return Err(io::Error::other(
+                "Wait for Claude Code to finish its pending request.",
+            ));
+        }
+        let link = p.link.take().ok_or_else(|| {
+            io::Error::other("This Claude session does not have a running process.")
+        })?;
+        p.move_release = Some(link.reap_status());
+        drop(link);
+        Ok(())
+    }
     fn finish_claude_handoff(&mut self, id: &str) -> bool {
         let Some(handoff) = self
             .claude_mut()
@@ -618,6 +662,96 @@ impl Store {
         store.state = Connection::Ready;
         store.changed.mark(Changed::CONNECTION);
         Ok(store)
+    }
+
+    /// Reserve the destination's Claude ID without starting a process or a turn.
+    pub fn prepare_claude_move_writer(&self, reserved: &str) -> io::Result<String> {
+        if self.is_host_client()
+            || !self.is_session_scoped()
+            || self.state != Connection::Ready
+            || !wire::catalog::valid_session_id(reserved)
+        {
+            return Err(io::Error::other(
+                "Open the target Claude route before preparing a move.",
+            ));
+        }
+        let origin = if self.profile.route.is_api() {
+            Origin::Api
+        } else {
+            Origin::Subscription
+        };
+        let key = session_key(&self.profile.route.billing, reserved);
+        if self.claude().sessions.contains_key(&key) || self.claude().catalog.contains_key(&key) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Claude already has this session. Open it to continue.",
+            ));
+        }
+        match self
+            .claude()
+            .launcher
+            .profiles
+            .modified(&self.profile.project, reserved, origin)
+        {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(key),
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Claude already has this session. Open it to continue.",
+            )),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Display an activated move's archive before Claude has written its first journal.
+    pub fn show_reserved_claude_move(&mut self, operation: &str, row: ThreadRow) -> io::Result<()> {
+        if self.prepare_claude_move_writer(operation)? != row.id {
+            return Err(io::Error::other("The reserved Claude writer changed."));
+        }
+        let thread = row.id.clone();
+        let access = self.move_start_access(Some(&thread));
+        self.restore_ended(&thread, row.title(), row.updated_at, None);
+        self.adopt_catalog_row(row)?;
+        self.selected = Some(thread.clone());
+        let transcript = self.transcripts.entry(thread.clone()).or_default();
+        transcript.ready = true;
+        transcript.verified = true;
+        transcript.loading = false;
+        transcript.error = None;
+        transcript.access = access;
+        self.changed.replace_transcript(&thread);
+        self.changed.mark(Changed::THREADS);
+        Ok(())
+    }
+
+    /// Send the operator's first explicit input to the already activated move.
+    /// If the first turn created a journal, use ordinary resume on later sends.
+    pub fn start_claude_move_turn(
+        &mut self,
+        reserved: &str,
+        owner: &str,
+        carried_request: String,
+        access: Option<Access>,
+    ) -> io::Result<()> {
+        if self.prepare_claude_move_writer(reserved)? != owner
+            || self.claude().dispatching_worker.is_some()
+        {
+            return Err(io::Error::other(
+                "This Claude session belongs to another move.",
+            ));
+        }
+        let previous = self.drafts.remove(&None);
+        let preset = std::mem::replace(&mut self.next_preset, access);
+        let options = self.next_options.take();
+        self.claude_move_session = Some(reserved.into());
+        let result = self.start_handoff(carried_request, vec![]);
+        self.claude_move_session = None;
+        self.next_preset = preset;
+        self.next_options = options;
+        self.drafts.remove(&None);
+        if let Some(draft) = previous {
+            self.drafts.insert(None, draft);
+        }
+        result
     }
     fn claude(&self) -> &Project {
         match &self.link {
@@ -972,7 +1106,10 @@ impl Store {
             Some(id) => id.to_owned(),
             None => match self.claude_mut().dispatching_worker.take() {
                 Some(id) => id,
-                None => self.spawn_claude(Session::New(new_id()?), None, false)?,
+                None => {
+                    let native = self.claude_move_session.take().map_or_else(new_id, Ok)?;
+                    self.spawn_claude(Session::New(native), None, false)?
+                }
             },
         };
         // A handoff's first turn titles the session from its request, not its block.

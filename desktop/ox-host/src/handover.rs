@@ -42,6 +42,7 @@ pub(crate) fn starts_work(action: &Action) -> bool {
             | Action::SendImages(..)
             | Action::StartWorker(_)
             | Action::StartHandoff(_)
+            | Action::MoveSession(_)
             | Action::InjectHandoff(..)
             | Action::ExecuteCommand(_)
             | Action::NativeCommand(..)

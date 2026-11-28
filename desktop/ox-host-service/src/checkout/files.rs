@@ -312,15 +312,22 @@ pub fn changed_private_inputs(root: &Path) -> io::Result<Vec<std::path::PathBuf>
     }
 }
 
-pub(super) fn unpack(root: &Path, input: &mut impl Read) -> io::Result<()> {
+pub(super) fn unpack(root: &Path, input: &mut impl Read, private_inputs: bool) -> io::Result<()> {
     let tree = Tree::open(root)?;
-    let mut excludes = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(root.join(".git/info/exclude"))?;
-    excludes.write_all(b"\n")?;
-    let mut names = tempfile::tempfile()?;
-    let mut baseline = io::BufWriter::new(File::create_new(root.join(BASELINE))?);
+    let mut private = if private_inputs {
+        let mut excludes = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(root.join(".git/info/exclude"))?;
+        excludes.write_all(b"\n")?;
+        Some((
+            excludes,
+            tempfile::tempfile()?,
+            io::BufWriter::new(File::create_new(root.join(BASELINE))?),
+        ))
+    } else {
+        None
+    };
     loop {
         let bytes = read_field(input)?;
         if bytes.is_empty() {
@@ -366,19 +373,24 @@ pub(super) fn unpack(root: &Path, input: &mut impl Read) -> io::Result<()> {
             }
             _ => return Err(io::Error::other("Unknown checkout file type")),
         };
-        write_field(&mut baseline, &bytes)?;
-        baseline.write_all(&mode)?;
-        baseline.write_all(&permissions)?;
-        baseline.write_all(&digest)?;
-        exclude(&mut excludes, &bytes)?;
-        names.write_all(&bytes)?;
-        names.write_all(&[0])?;
+        if let Some((excludes, names, baseline)) = &mut private {
+            write_field(baseline, &bytes)?;
+            baseline.write_all(&mode)?;
+            baseline.write_all(&permissions)?;
+            baseline.write_all(&digest)?;
+            exclude(excludes, &bytes)?;
+            names.write_all(&bytes)?;
+            names.write_all(&[0])?;
+        }
     }
-    write_field(&mut baseline, &[])?;
-    baseline.flush()?;
     if input.read(&mut [0])? != 0 {
         return Err(io::Error::other("Unexpected trailing checkout data"));
     }
+    let Some((_, mut names, mut baseline)) = private else {
+        return Ok(());
+    };
+    write_field(&mut baseline, &[])?;
+    baseline.flush()?;
     if names.stream_position()? != 0 {
         names.rewind()?;
         let ignored = git(root)

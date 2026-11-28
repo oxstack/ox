@@ -38,6 +38,7 @@ pub(crate) struct App {
     pub inventory: Arc<crate::inventory::Cache>,
     pub slots: Arc<Semaphore>,
     pub jobs: Option<crate::linked_jobs::Dispatch>,
+    pub moves: Option<crate::move_transport::Receiver>,
     pub discovered: Arc<Mutex<std::collections::HashSet<ox_desk_core::host_protocol::Scope>>>,
 }
 #[path = "key_transfer.rs"]
@@ -78,20 +79,33 @@ pub fn run_with_jobs(
     host_socket: PathBuf,
     jobs: Option<crate::linked_jobs::Dispatch>,
 ) -> io::Result<()> {
+    run_with_receivers(state_dir, host_socket, jobs, None)
+}
+pub fn run_with_receivers(
+    state_dir: PathBuf,
+    host_socket: PathBuf,
+    jobs: Option<crate::linked_jobs::Dispatch>,
+    moves: Option<crate::move_transport::Receiver>,
+) -> io::Result<()> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(serve(state_dir, host_socket, jobs))
+        .block_on(serve(state_dir, host_socket, jobs, moves))
 }
 async fn serve(
     dir: PathBuf,
     socket: PathBuf,
     jobs: Option<crate::linked_jobs::Dispatch>,
+    moves: Option<crate::move_transport::Receiver>,
 ) -> io::Result<()> {
     let store = State::load(&dir)?;
     crate::worker_checkout::receiver::recover(&store.worker_directory())?;
+    if moves.is_some() {
+        state::move_staging::recover(&dir)?;
+    }
     let app = App {
         jobs,
+        moves,
         state: Arc::new(Mutex::new(store)),
         host: Arc::new(socket),
         slots: Arc::new(Semaphore::new(64)),
@@ -242,12 +256,14 @@ async fn administer(
             may_launch,
             ceiling,
             may_sync_memory,
+            may_accept_moves,
         } => app.state.lock().unwrap().edit_worker(
             &id,
             &before,
             may_launch,
             ceiling,
             may_sync_memory,
+            may_accept_moves,
         )?,
         Request::Update { .. } | Request::WorkerLinks { .. } => {
             unreachable!("handled before Serve administration")
@@ -466,6 +482,15 @@ fn start_listener(app: App, origin: String, listener: TcpListener) -> Listener {
             get(|| async { asset("text/javascript", include_bytes!("../assets/controls.js")) }),
         )
         .route(
+            "/move-controls.js",
+            get(|| async {
+                asset(
+                    "text/javascript",
+                    include_bytes!("../assets/move-controls.js"),
+                )
+            }),
+        )
+        .route(
             "/model.js",
             get(|| async { asset("text/javascript", include_bytes!("../assets/model.js")) }),
         )
@@ -582,6 +607,19 @@ fn start_listener(app: App, origin: String, listener: TcpListener) -> Listener {
         .route(
             "/api/worker-result",
             get(crate::worker_result::transport::upgrade),
+        )
+        .route(
+            "/api/move-reserve",
+            post(crate::move_transport::reserve).layer(DefaultBodyLimit::max(256 * 1024)),
+        )
+        .route("/api/move-stage", get(crate::move_transport::prepare))
+        .route(
+            "/api/move-activate",
+            post(crate::move_transport::activate).layer(DefaultBodyLimit::max(256 * 1024)),
+        )
+        .route(
+            "/api/move-cancel",
+            post(crate::move_transport::cancel).layer(DefaultBodyLimit::max(256 * 1024)),
         )
         .route("/api/push", post(subscribe))
         .route("/api/weather", post(weather::weather))
@@ -1085,6 +1123,12 @@ mod tests {
         }
         /// A real remote listener in front of a silent stand-in session host, with one paired device.
         pub(super) async fn start() -> Live {
+            start_with_moves(None).await
+        }
+
+        pub(super) async fn start_with_moves(
+            moves: Option<crate::move_transport::Receiver>,
+        ) -> Live {
             let dir = tempfile::tempdir().unwrap();
             fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
             let mut state = State::load(dir.path()).unwrap();
@@ -1116,6 +1160,7 @@ mod tests {
             });
             let app = App {
                 jobs: None,
+                moves,
                 state: Arc::new(Mutex::new(state)),
                 host: Arc::new(socket),
                 slots: Arc::new(Semaphore::new(4)),
@@ -1135,6 +1180,46 @@ mod tests {
                 host_connected,
                 _listener: listener,
             }
+        }
+
+        pub(super) fn pair_worker(live: &Live, source: &str, target: &str) -> String {
+            fs::write(live._dir.path().join("host-id"), target).unwrap();
+            let mut state = live.app.state.lock().unwrap();
+            let code = state
+                .local_worker_invite(Some(LOGIN.into()))
+                .unwrap()
+                .short_code
+                .unwrap();
+            let public = B64.encode(live.key.verifying_key().to_encoded_point(false).as_bytes());
+            state
+                .pair(
+                    LOGIN,
+                    &code,
+                    &public,
+                    &sign(&live.key, &format!("{code}.host.{source}")),
+                    "Source host",
+                    state::Enrollment {
+                        class: crate::admin::DeviceClass::Host,
+                        source: Some(source),
+                    },
+                )
+                .unwrap()
+        }
+
+        pub(super) fn signed_move(live: &Live, device: &str, request: &str) -> String {
+            use sha2::{Digest, Sha256};
+
+            let nonce = live
+                .app
+                .state
+                .lock()
+                .unwrap()
+                .challenge(device, Purpose::Worker)
+                .unwrap();
+            let digest = B64.encode(Sha256::digest(request.as_bytes()));
+            let signature = sign(&live.key, &format!("{nonce}.{digest}"));
+            json!({"request": request, "proof": {"nonce": nonce, "signature": signature}})
+                .to_string()
         }
         pub(super) struct Req<'a> {
             pub method: &'a str,
@@ -1227,6 +1312,196 @@ mod tests {
             out.extend(payload.bytes().enumerate().map(|(i, b)| b ^ mask[i % 4]));
             out
         }
+    }
+
+    #[tokio::test]
+    async fn signed_move_routes_require_destination_permission_and_an_exact_reservation() {
+        use crate::{
+            move_manifest::{CHECKOUT, FileSpec, Manifest, PLAN, TRANSCRIPT},
+            move_transport::{Cancellation, Incoming, Offer, Reservation},
+            state::move_staging::send_files_for_prepare,
+            worker_checkout::connection::Connection,
+        };
+        use live::{HOST, LOGIN, ORIGIN, Req, send, signed_move};
+        use sha2::{Digest, Sha256};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::net::TcpStream;
+        use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+
+        const SOURCE: &str = "74b2c731-b9f0-4b05-8672-3c42062b190a";
+        const TARGET: &str = "06f2bbe4-12bb-4243-ab20-657f19c02d36";
+        const TRANSFER: &str = "ddcba183-5073-4e9a-9825-e8730784ce5e";
+        const PLAN_JSON: &str = r#"{"session":"original"}"#;
+        let prepared = Arc::new(AtomicBool::new(false));
+        let marker = prepared.clone();
+        let receiver = Arc::new(move |request| match request {
+            Incoming::Reserve(plan) => {
+                assert_eq!(plan.proposal, "fixture proposal");
+                Ok(json!(PLAN_JSON))
+            }
+            Incoming::Prepare(staged) => {
+                assert_eq!(staged.offer.transfer, TRANSFER);
+                assert_eq!(
+                    staged.expected_plan,
+                    Some(Sha256::digest(PLAN_JSON.as_bytes()).into())
+                );
+                marker.store(true, Ordering::SeqCst);
+                Ok(json!({"native": "studio"}))
+            }
+            Incoming::Activate(activation) => activation.commit(|source, transfer, _, commit| {
+                assert_eq!((source, transfer), (SOURCE, TRANSFER));
+                if !marker.load(Ordering::SeqCst) || commit != json!({"native": "studio"}) {
+                    return Err(io::Error::other(
+                        "The destination has not prepared this writer.",
+                    ));
+                }
+                Ok(json!({"ready": true}))
+            }),
+            Incoming::Cancel(cancellation) => cancellation.cancel(|_| {
+                Err::<serde_json::Value, _>(io::Error::other(
+                    "The destination already accepted the move.",
+                ))
+            }),
+        });
+        let live = live::start_with_moves(Some(receiver)).await;
+        let cookie = live::pair_worker(&live, SOURCE, TARGET);
+        let device = live
+            .app
+            .state
+            .lock()
+            .unwrap()
+            .identity(LOGIN, &cookie)
+            .unwrap();
+        let reserve = serde_json::to_string(&Reservation {
+            source: SOURCE.into(),
+            target: TARGET.into(),
+            transfer: TRANSFER.into(),
+            proposal: "fixture proposal".into(),
+        })
+        .unwrap();
+        let post = |path, body| Req {
+            method: "POST",
+            path,
+            cookie: Some(&cookie),
+            body,
+            ..Req::default()
+        };
+        let denied = signed_move(&live, &device, &reserve);
+        assert_eq!(
+            send(live.addr, post("/api/move-reserve", &denied), true)
+                .await
+                .0,
+            403
+        );
+        {
+            let mut state = live.app.state.lock().unwrap();
+            let before = state.worker_grant(&device).unwrap().clone();
+            state
+                .edit_worker(&device, &before, false, before.ceiling, None, Some(true))
+                .unwrap();
+        }
+        let approved = signed_move(&live, &device, &reserve);
+        assert_eq!(
+            send(live.addr, post("/api/move-reserve", &approved), true)
+                .await
+                .0,
+            200
+        );
+        assert_eq!(
+            send(live.addr, post("/api/move-reserve", &approved), true)
+                .await
+                .0,
+            403
+        );
+
+        let files = tempfile::tempdir().unwrap();
+        let spec = |name: &str, data: &[u8]| {
+            fs::write(files.path().join(name), data).unwrap();
+            FileSpec {
+                bytes: data.len() as u64,
+                sha256: Sha256::digest(data).into(),
+            }
+        };
+        let offer = Offer {
+            source: SOURCE.into(),
+            target: TARGET.into(),
+            transfer: TRANSFER.into(),
+            manifest: Manifest {
+                plan: spec(PLAN, PLAN_JSON.as_bytes()),
+                transcript: spec(TRANSCRIPT, b"conversation"),
+                checkout: spec(CHECKOUT, b"project"),
+            },
+        };
+        let commit = json!({"offer": offer, "commit": {"native": "studio"}}).to_string();
+        let early_commit = signed_move(&live, &device, &commit);
+        assert_eq!(
+            send(live.addr, post("/api/move-activate", &early_commit), true)
+                .await
+                .0,
+            403
+        );
+
+        let mut request = format!("ws://{HOST}/api/move-stage")
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("origin", ORIGIN.parse().unwrap());
+        request
+            .headers_mut()
+            .insert("tailscale-user-login", LOGIN.parse().unwrap());
+        request.headers_mut().insert(
+            "cookie",
+            format!("__Host-ox-device={cookie}").parse().unwrap(),
+        );
+        let (socket, _) =
+            tokio_tungstenite::client_async(request, TcpStream::connect(live.addr).await.unwrap())
+                .await
+                .unwrap();
+        let mut socket = Connection::open(socket);
+        socket
+            .send(Message::Text(
+                signed_move(&live, &device, &serde_json::to_string(&offer).unwrap()).into(),
+            ))
+            .await
+            .unwrap();
+        let receipt: serde_json::Value = send_files_for_prepare(&mut socket, &offer, files.path())
+            .await
+            .unwrap();
+        assert_eq!(receipt, json!({"native": "studio"}));
+        assert!(prepared.load(Ordering::SeqCst));
+        let final_commit = signed_move(&live, &device, &commit);
+        let (status, mut response) =
+            send(live.addr, post("/api/move-activate", &final_commit), true).await;
+        assert_eq!(status, 200);
+        let mut body = String::new();
+        response.read_to_string(&mut body).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+            json!({"receipt": {"ready": true}})
+        );
+        let cancelled = serde_json::to_string(&Cancellation {
+            source: SOURCE.into(),
+            target: TARGET.into(),
+            transfer: TRANSFER.into(),
+            cancelled_plan: PLAN_JSON.into(),
+        })
+        .unwrap();
+        let cancelled = signed_move(&live, &device, &cancelled);
+        let (_, mut response) = send(live.addr, post("/api/move-cancel", &cancelled), true).await;
+        body.clear();
+        response.read_to_string(&mut body).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+            json!({"error": "The destination already accepted the move."})
+        );
+        let retry = signed_move(&live, &device, &commit);
+        assert_eq!(
+            send(live.addr, post("/api/move-activate", &retry), true)
+                .await
+                .0,
+            200
+        );
     }
 
     #[tokio::test]

@@ -232,13 +232,13 @@ export class SessionControls {
     }
     this.caps = (draft ? state.capabilities : row.capabilities) ?? [];
     const confirmed = draft ? detail.applied_draft_access : own.access;
-    const planned = draft ? detail.next_access : null;
+    const planned = draft ? detail.next_access : own.resume_access;
     const current = confirmed ?? planned;
     const badge = $("access-mode");
     badge.textContent = confirmed
       ? (modes[confirmed] ?? confirmed)
       : planned
-        ? (modes[planned] ?? planned) + " on start"
+        ? (modes[planned] ?? planned) + (draft ? " on start" : " on resume")
         : "Permission mode";
     badge.dataset.bypass = String(bypass(confirmed));
     // An active YOLO grant is part of the chip, so its state is visible without opening settings.

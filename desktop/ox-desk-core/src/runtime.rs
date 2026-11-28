@@ -37,6 +37,9 @@ impl Runtime {
             billing: alias.map_or(Billing::Subscription, Billing::Api),
         }
     }
+    pub fn supports_session_moves(self) -> bool {
+        matches!(self, Self::Codex | Self::Claude)
+    }
     pub fn executable(self) -> &'static str {
         match self {
             Self::Codex => "codex",

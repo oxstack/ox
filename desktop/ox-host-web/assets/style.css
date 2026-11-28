@@ -1004,6 +1004,87 @@ main:has(#conversation:not([hidden])) {
 #conversation:has(#session-settings:not([hidden])) #composer {
   position: static;
 }
+#conversation:has(#move-progress[data-locked="true"]:not([hidden])) #composer {
+  display: none;
+}
+#move-dialog {
+  inset: auto 0 0;
+  width: min(100%, 32rem);
+  max-height: calc(100dvh - 1rem);
+  margin: 0 auto;
+  overflow: auto;
+  padding: 1rem 1rem max(1rem, env(safe-area-inset-bottom));
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 1rem 1rem 0 0;
+}
+#move-dialog::backdrop {
+  background: rgb(5 5 13 / 63%);
+}
+#move-form {
+  display: grid;
+  gap: 0.5rem;
+}
+#move-form h2,
+#move-form p,
+#move-progress h2,
+#move-progress p {
+  margin: 0;
+}
+#move-form p,
+#move-progress p {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+#move-form p:empty {
+  display: none;
+}
+#move-form .actions,
+#move-progress-actions {
+  display: flex;
+  gap: 0.45rem;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+#move-form .actions {
+  margin-top: 0.3rem;
+}
+#move-submit,
+#move-progress a {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+#move-progress a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  border-radius: 3px;
+  padding: 0.5rem 0.85rem;
+  font-weight: 550;
+  text-decoration: none;
+}
+#move-progress {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0.65rem 0;
+  padding: 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 0.7rem;
+  background: var(--panel);
+  overflow-wrap: anywhere;
+}
+#move-progress[data-phase="waiting"] {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+#move-progress h2 {
+  font-size: 1rem;
+  line-height: 1.25;
+}
+#move-progress[data-phase="ready"] h2 {
+  color: var(--success);
+}
 
 /* Keep project navigation and actions within thumb reach on small screens. */
 .heading,

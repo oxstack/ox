@@ -320,6 +320,7 @@ mod tests {
             source: "host-a".into(),
             may_launch: true,
             may_sync_memory,
+            may_accept_moves: false,
             ceiling: ox_desk_core::modes::Level::Yolo,
         };
         assert!(!sync_granted(None, "host-a"));

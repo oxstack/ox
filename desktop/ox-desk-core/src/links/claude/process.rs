@@ -16,8 +16,19 @@ use std::{
 const CLOSED_BY_DESKTOP: &str = "Connection closed by desktop";
 
 pub(super) struct Process {
+    pub(super) group: u32,
     write: mpsc::Sender<Value>,
     close: mpsc::Sender<String>,
+    reaped: ReapStatus,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ReapStatus(Arc<AtomicBool>);
+
+impl ReapStatus {
+    pub(crate) fn confirmed(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
 }
 
 impl Process {
@@ -33,12 +44,15 @@ impl Process {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
+        let group = child.id();
         let (write, messages) = mpsc::channel::<Value>();
         let (close, ends) = mpsc::channel::<String>();
         let mut out = BufReader::new(child.stdout.take().expect("piped stdout"));
         let mut input = BufWriter::new(child.stdin.take().expect("piped stdin"));
         let stderr = child.stderr.take().expect("piped stderr");
         let eof = close.clone();
+        let reaped = ReapStatus::default();
+        let child_reaped = reaped.clone();
         thread::spawn(move || {
             let mut line = Vec::new();
             let result = (|| -> io::Result<()> {
@@ -120,7 +134,9 @@ impl Process {
             unsafe {
                 libc::kill(group, libc::SIGKILL);
             }
-            let _ = child.wait();
+            child_reaped
+                .0
+                .store(child.wait().is_ok(), Ordering::Release);
             // A command launched by Claude can retain stderr after its session exits.
             // The helper's sign-in error is relevant only before initialization.
             let needs_login = if was_ready && reason == CLOSED_BY_DESKTOP {
@@ -130,7 +146,15 @@ impl Process {
             };
             closed(reason, needs_login);
         });
-        Ok(Self { write, close })
+        Ok(Self {
+            group,
+            write,
+            close,
+            reaped,
+        })
+    }
+    pub(super) fn reap_status(&self) -> ReapStatus {
+        self.reaped.clone()
     }
     /// A handle the reader can use to answer a request without going through the link.
     pub(super) fn writer(&self) -> mpsc::Sender<Value> {

@@ -124,6 +124,16 @@ impl Store {
         )
         .or_else(|| self.remote().is_none().then(|| self.start_mode()).flatten())
     }
+    /// An incoming move uses this host's settings and its own optional mode
+    /// selection. It must not consume a preset chosen for an unrelated draft.
+    pub fn move_start_access(&self, id: Option<&str>) -> Option<crate::runtime::Access> {
+        self.starting_access(
+            self.host_start
+                .map(|level| level.preset(self.profile.route.runtime)),
+            id.and_then(|id| self.claude_resume_access(id)),
+        )
+        .or_else(|| self.start_mode())
+    }
     pub fn set_next_access(&mut self, access: crate::codex::access::Access) {
         if !crate::runtime::Access::choices(self.profile.route.runtime).contains(&access)
             && access != crate::runtime::Access::Configured
@@ -287,6 +297,9 @@ impl Store {
                 }
             }
             Notification::Closed(id) => {
+                if self.observe_codex_move_close(&id) {
+                    return Ok(());
+                }
                 if let Some(row) = self.catalog.get_mut(&id) {
                     row.status = None;
                 }

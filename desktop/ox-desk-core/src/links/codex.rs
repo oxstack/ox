@@ -26,6 +26,7 @@ pub struct Launch {
 pub use super::LinkEvent;
 
 pub struct Link {
+    group: u32,
     methods: Arc<Mutex<HashMap<i64, Method>>>,
     writes: mpsc::Sender<Outgoing>,
     close: mpsc::Sender<String>,
@@ -55,6 +56,7 @@ impl Link {
             .stderr(Stdio::piped())
             .process_group(0)
             .spawn()?;
+        let group = child.id();
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
@@ -131,10 +133,15 @@ impl Link {
             });
         });
         Ok(Self {
+            group,
             writes,
             close,
             methods,
         })
+    }
+
+    pub(crate) fn process_group(&self) -> u32 {
+        self.group
     }
 
     pub fn request(&self, seq: i64, call: Call) -> io::Result<()> {

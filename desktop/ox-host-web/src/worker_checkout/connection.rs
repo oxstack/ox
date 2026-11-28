@@ -8,7 +8,7 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite;
 const HEARTBEAT: Duration = Duration::from_secs(15);
-pub(super) const IDLE: Duration = Duration::from_secs(90);
+pub(crate) const IDLE: Duration = Duration::from_secs(90);
 
 pub(crate) trait Frame: Send + 'static {
     fn ping() -> Self;
@@ -98,6 +98,21 @@ impl<M: Frame> Connection<M> {
         self.incoming.recv().await.ok_or_else(disconnected)
     }
 }
+
+impl Connection<axum::extract::ws::Message> {
+    /// Let the peer read the terminal reply before closing the transport.
+    pub async fn finish(&mut self) {
+        if self
+            .send(axum::extract::ws::Message::Close(None))
+            .await
+            .is_ok()
+        {
+            // A peer may close its connection as soon as it reads the reply.
+            let _ = timeout(HEARTBEAT, self.next()).await;
+        }
+    }
+}
+
 fn disconnected() -> io::Error {
     io::Error::new(
         io::ErrorKind::ConnectionAborted,

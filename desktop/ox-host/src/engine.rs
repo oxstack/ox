@@ -43,6 +43,8 @@ pub(crate) enum Message {
     Outbound(Box<forwarding::Event>),
     WorkerResult(u64, Box<Result<ox_host_web::worker_result::Report, String>>),
     LinkedJob(Box<ox_host_web::linked_jobs::VerifiedJob>, Replier),
+    MoveReceive(Box<move_receive::Request>),
+    MoveSend(Box<move_send::Outcome>),
     Gateway {
         caller: Caller,
         request: Box<Gateway>,
@@ -338,6 +340,9 @@ pub(crate) struct Engine {
     host_name: String,
     subscription_limits: ox_desk_core::usage::reported::ReportedLimits,
     ledger: Ledger,
+    source_moves: source_moves::SourceMoves,
+    move_send: move_send::Outgoing,
+    target_moves: target_moves::TargetMoves,
     replay: Replay,
     tx: SyncSender<Message>,
     clients: BTreeMap<u64, ClientState>,
@@ -379,7 +384,11 @@ mod linked;
 mod placement;
 use placement::HostQuery;
 mod mode_requests;
+mod move_receive;
+mod move_send;
 mod notices;
+mod source_moves;
+mod target_moves;
 
 impl Drop for Engine {
     fn drop(&mut self) {
@@ -423,7 +432,7 @@ impl Engine {
         // Capture retired approval counts for the recovery snapshot before the
         // new epoch discards the previous runtime's tokens.
         ledger.begin(seq)?;
-        Ok(Self {
+        let engine = Self {
             replacement: None,
             host_id,
             resources: Default::default(),
@@ -432,6 +441,9 @@ impl Engine {
             host_name: sysinfo::System::host_name().unwrap_or_else(|| host_id.to_string()),
             config,
             ledger,
+            source_moves: source_moves::SourceMoves::open(dir, host_id)?,
+            move_send: move_send::Outgoing::default(),
+            target_moves: target_moves::TargetMoves::default(),
             replay: Replay::new(seq, nonce()?),
             tx,
             clients: Default::default(),
@@ -463,10 +475,17 @@ impl Engine {
             next_reap: Instant::now() + REAP_EVERY,
             last_mode_policy: HostPolicy::read(dir).ok(),
             schema_reader: Default::default(),
-        })
+        };
+        let engine = engine.recover_move_targets()?;
+        Ok(engine)
+    }
+    pub(crate) fn move_receiver(&self) -> ox_host_web::move_transport::Receiver {
+        move_receive::receiver(self.state_dir.clone(), self.host_id, self.tx.clone())
     }
     pub(crate) fn serve(&mut self, rx: Receiver<Message>) -> io::Result<()> {
         self.recover_worker_results();
+        self.advance_source_moves()?;
+        self.drive_move_transfers()?;
         // Mailbox messages served in a row while a timer was already overdue.
         let mut overdue_streak = 0u32;
         loop {
@@ -575,6 +594,10 @@ impl Engine {
                         self.reap_idle(now)?;
                     }
                     self.poll_forwarded(now)?;
+                    {
+                        self.advance_source_moves()?;
+                        self.drive_move_transfers()?;
+                    }
                     self.advance_flows()?;
                 }
                 Some(Message::Replace(binary, _reservation)) => {
@@ -621,6 +644,8 @@ impl Engine {
                     self.worker_results.insert(id, state);
                 }
                 Some(Message::LinkedJob(job, reply)) => self.linked_job(*job, reply)?,
+                Some(Message::MoveReceive(request)) => self.receive_move(*request),
+                Some(Message::MoveSend(outcome)) => self.move_outcome(*outcome)?,
                 Some(Message::Gateway {
                     caller,
                     request,
@@ -629,7 +654,13 @@ impl Engine {
                     Gateway::Launch(_) if self.draining.is_some() => {
                         self.answer(reply, Err(crate::handover::REFUSAL.into()))?
                     }
-                    Gateway::Launch(start) => self.launch(caller, start, reply)?,
+                    Gateway::Launch(start) => {
+                        if let Err(error) = self.check_move_launch(&caller) {
+                            self.answer(reply, Err(error.to_string()))?;
+                            continue;
+                        }
+                        self.launch(caller, start, reply)?;
+                    }
                     Gateway::Call(ParentCall::ListHosts) => self.list_hosts(&caller, reply)?,
                     Gateway::Call(call @ ParentCall::ReadThread { .. }) => {
                         self.read_thread(&caller, call, reply)?
@@ -811,6 +842,7 @@ impl Engine {
                 capabilities.push("worker_codex_subscription".into());
                 capabilities.push("worker_placement".into());
                 capabilities.push("remote_handoff".into());
+                capabilities.push("session_moves".into());
                 capabilities.push("handoff_history".into());
                 capabilities.push("linked_read_workers".into());
                 capabilities.push("linked_write_workers".into());
@@ -984,6 +1016,11 @@ impl Engine {
                 target_host,
                 window,
             } => {
+                if let Err(error) =
+                    self.check_source_move_action(&scope, &Action::StartHandoff(start.clone()))
+                {
+                    return self.answer(Replier::Client(id, key), Err(error.to_string()));
+                }
                 let result = self.export_handoff(id, &key, scope, start, target_host, window);
                 if let Err(error) = result {
                     self.answer(Replier::Client(id, key), Err(error.to_string()))?;
@@ -1056,6 +1093,33 @@ impl Engine {
                         id,
                         fail("Subscribe to the target scope before sending actions".into()),
                     );
+                }
+                let action = match action {
+                    Action::MoveSession(start) if approval.is_none() => {
+                        if self.draining.is_some() || self.update_reserved() {
+                            return self.reply(id, fail(crate::handover::REFUSAL.into()));
+                        }
+                        return match self.start_move(id, key.clone(), scope, start) {
+                            Ok(()) => Ok(()),
+                            Err(error) => self.reply(id, fail(error.to_string())),
+                        };
+                    }
+                    command @ (Action::CancelMove(_)
+                    | Action::CheckMove(_)
+                    | Action::RetryMove(_))
+                        if approval.is_none() =>
+                    {
+                        return match self.move_command(&scope, &command) {
+                            Ok(()) => self.reply(id, Server::Ack { id: key }),
+                            Err(error) => self.reply(id, fail(error.to_string())),
+                        };
+                    }
+                    other => other,
+                };
+                if !self.running.contains_key(&scope)
+                    && let Err(error) = self.check_source_move_action(&scope, &action)
+                {
+                    return self.reply(id, fail(error.to_string()));
                 }
                 // Ending a thread on a route the host closed needs no process: nothing
                 // there is running, so reopening one only to tell it so would start a runtime
@@ -1433,6 +1497,9 @@ impl Engine {
         if let Some(previous) = previous {
             store.recover_from(&mut previous.store);
         }
+        for (operation, native) in self.source_moves.ledger.unpublished_writers(scope) {
+            store.recover_prepared_move_writer(operation.to_string(), native);
+        }
         annotate(
             &self.host_id.to_string(),
             &self.workers,
@@ -1534,6 +1601,33 @@ impl Engine {
         approval: Option<String>,
         approved_mode: Option<(ox_desk_core::modes::Level, Sender)>,
     ) -> io::Result<()> {
+        if self.view_source_move_status(scope, &action)? {
+            return Ok(());
+        }
+        self.check_source_move_action(scope, &action)?;
+        match &action {
+            Action::LoadOlder(thread) if self.load_moved_history(scope, thread, true)? => {
+                return Ok(());
+            }
+            Action::SelectThread(thread) => {
+                self.load_moved_history(scope, thread, false)?;
+                if self.view_reserved_claude_move(scope, thread)? {
+                    return Ok(());
+                }
+            }
+            Action::SendText(Some(thread), _)
+            | Action::SendImages(Some(thread), _, _)
+            | Action::Submit(Some(thread)) => {
+                self.load_moved_history(scope, thread, false)?;
+            }
+            Action::OpenCatalogRow(row) => {
+                self.load_moved_history(scope, &row.id, false)?;
+                if self.view_reserved_claude_move(scope, &row.id)? {
+                    return Ok(());
+                }
+            }
+            _ => (),
+        }
         let live = self.running.get_mut(scope).expect("validated live scope");
         if let Action::AnswerAsk(ask, _) | Action::AnswerQuestions(ask, _) = &action
             && (approval.is_none() || live.tokens.get(ask) != approval.as_ref())
@@ -1766,6 +1860,7 @@ impl Engine {
         let sender = approved_mode
             .as_ref()
             .map_or_else(|| self.sender(id), |(_, sender)| sender.clone());
+        let first_moved_input = self.moved_claude_input(scope, &action)?;
         let live = self.running.get_mut(scope).expect("validated live scope");
         let mut fork_restore = None;
         if may_open {
@@ -1778,9 +1873,12 @@ impl Engine {
             });
             if (opens || resume.is_some()) && policy == HostPolicy::YoloAsksEveryTime {
                 let level = if let Some(t) = resume {
-                    live.store
-                        .claude_resume_access(t)
-                        .and_then(|mode| ox_desk_core::modes::Level::of(scope.route.runtime, mode))
+                    let access = if first_moved_input.is_some() {
+                        live.store.move_start_access(Some(t))
+                    } else {
+                        live.store.claude_resume_access(t)
+                    };
+                    access.and_then(|mode| Level::of(scope.route.runtime, mode))
                 } else if fork {
                     (!live.store.is_session_scoped())
                         .then(|| live.store.applied_ceiling(target.as_deref()))
@@ -1827,7 +1925,15 @@ impl Engine {
                 }
             }
         }
-        let sent = live.store.dispatch_as(action, sender);
+        let sent = if let Some((move_id, native, request)) = first_moved_input {
+            let access = live.store.claude_resume_access(&native);
+            live.store
+                .start_claude_move_turn(&move_id.to_string(), &native, request, access)?;
+            live.store.edit(Some(&native), String::new());
+            Ok(ox_desk_core::actions::Effect::Applied)
+        } else {
+            live.store.dispatch_as(action, sender)
+        };
         if let Some(before) = fork_restore {
             live.store.set_host_start(before);
         }
@@ -1873,6 +1979,12 @@ impl Engine {
     ) -> io::Result<()> {
         self.process_scope(scope, events, from_action)?;
         self.apply_notice_receipts(scope)?;
+        {
+            self.collect_source_move_releases(scope)?;
+            self.collect_target_move_preparations(scope);
+            self.advance_source_moves()?;
+            self.drive_move_transfers()?;
+        }
         self.advance_flows()
     }
     fn process_scope(
@@ -1887,6 +1999,8 @@ impl Engine {
         for event in events {
             let previous = live.store.asks().len();
             live.store.apply(event);
+            self.source_moves
+                .observe_native_results(scope, &live.store)?;
             if let Some(report) = live.store.usage.worker_report.take() {
                 self.subscription_limits.record(&scope.route, report);
             }
@@ -2145,7 +2259,17 @@ impl Engine {
             }
         }
         live.tracker.sync(&processes);
-        let mut changes = live.store.host_project(scope, &dirty, &mut live.state);
+        let mut changes = live
+            .store
+            .host_project_rows(&dirty, &mut live.state, |row| {
+                self.move_send.project_row(
+                    &self.source_moves.ledger,
+                    &self.state_dir,
+                    &self.target_moves,
+                    scope,
+                    row,
+                )
+            })?;
         crate::yolo::merge(
             &self.asking,
             self.mode_requests
@@ -2281,7 +2405,7 @@ impl Engine {
                 }
             }
         }
-        if changes.iter().any(|c| {
+        let save_scope = changes.iter().any(|c| {
             matches!(
                 c,
                 Change::Asks { .. }
@@ -2289,9 +2413,7 @@ impl Engine {
                     | Change::Sessions { .. }
                     | Change::Retired { .. }
             )
-        }) {
-            self.ledger.update(SavedScope::from_state(&live.state))?;
-        }
+        });
         let worker_state_changed = changes.iter().any(|c| {
             matches!(
                 c,
@@ -2302,6 +2424,10 @@ impl Engine {
                     | Change::Transcript { .. }
             )
         });
+        if save_scope {
+            self.ledger
+                .update(SavedScope::from_state(&self.running[scope].state))?;
+        }
         self.broadcast(scope, changes)?;
         if let Some((id, frame)) = handoff {
             self.reply(id, frame)?;
@@ -3224,6 +3350,7 @@ impl Engine {
     /// A busy thread is refused unless `force` is set, so a stale window or remote client
     /// cannot kill a running turn and its workers by accident.
     fn end_thread(&mut self, scope: &Scope, thread: &str, force: bool) -> io::Result<()> {
+        self.check_source_move_action(scope, &Action::EndSession(thread.into()))?;
         if !self.running.contains_key(scope) {
             return Err(io::Error::other(
                 "This route is not open on the session host.",
@@ -3332,6 +3459,9 @@ impl Engine {
     /// app-server (or the idle Claude draft process). The saved sessions stay listed
     /// and the next subscriber or action reopens the route.
     fn reap_empty(&mut self, scope: &Scope) -> io::Result<()> {
+        if self.hold_move_source_scope(scope)? {
+            return Ok(());
+        }
         let Some(live) = self.running.get(scope) else {
             return Ok(());
         };
@@ -3537,6 +3667,8 @@ fn catalog_row(view: &wire::SessionView) -> wire::SessionView {
         "worker_model",
         "worker_notice",
         "last_result",
+        "logical_session_id",
+        "move",
     ]
     .into_iter()
     .filter_map(|k| Some((k.to_owned(), view.detail.get(k)?.clone())))
@@ -4665,6 +4797,128 @@ mod tests {
                 ..parent.clone()
             };
             (parent, worker)
+        }
+
+        fn move_plan(engine: &Engine, scope: &Scope, native: &str) -> crate::move_ledger::Plan {
+            crate::move_ledger::Plan {
+                id: uuid::Uuid::new_v4(),
+                session: uuid::Uuid::new_v4(),
+                source: crate::move_ledger::Owner {
+                    host: engine.host_id,
+                    generation: 0,
+                    scope: scope.clone(),
+                    native: native.into(),
+                },
+                target_host: uuid::Uuid::new_v4(),
+                target_scope: Scope {
+                    project: "/studio/project".into(),
+                    route: scope.route.clone(),
+                },
+            }
+        }
+
+        #[test]
+        fn queued_source_move_reserves_the_next_turn_until_the_exact_result_is_idle() {
+            use crate::move_ledger::Status;
+            let root = tempfile::tempdir().unwrap();
+            let (tx, _mailbox) = std::sync::mpsc::sync_channel(32);
+            let (scope, other_route) = scopes(root.path());
+            let mut engine = Engine::open(config(root.path()), root.path(), tx).unwrap();
+            let (source, sent) = live(
+                &scope,
+                vec![view(&scope, "lead", "running", "default")],
+                &["lead"],
+                vec![],
+            );
+            engine.running.insert(scope.clone(), source);
+            let plan = move_plan(&engine, &scope, "lead");
+            assert_eq!(
+                engine.prepare_source_move(&plan, true).unwrap(),
+                Status::Queued
+            );
+            let send = || Action::SendText(Some("lead".into()), "existing turn".into());
+            assert!(engine.check_source_move_action(&scope, &send()).is_ok());
+            assert!(
+                engine
+                    .check_source_move_action(
+                        &scope,
+                        &Action::DraftEdit(Some("lead".into()), "existing turn".into()),
+                    )
+                    .is_ok()
+            );
+            assert!(
+                engine
+                    .check_source_move_action(&scope, &Action::Stop("lead".into()))
+                    .is_ok()
+            );
+            assert!(
+                engine
+                    .check_source_move_action(&scope, &Action::Terminal(Some("lead".into())))
+                    .is_err()
+            );
+
+            let update = |engine: &mut Engine, seq, active: Option<&str>, finished: &str| {
+                let mut row = view(
+                    &scope,
+                    "lead",
+                    if active.is_some() { "running" } else { "idle" },
+                    "default",
+                );
+                row.detail["last_result"] =
+                    json!({"turn":finished,"completed_at":1,"outcome":"completed"});
+                let events = vec![LinkEvent::Host(Box::new(Server::Delta {
+                    cursor: Cursor {
+                        epoch: "e".into(),
+                        seq,
+                    },
+                    scope: scope.clone(),
+                    changes: vec![
+                        Change::Session { session: row },
+                        Change::TimelineState {
+                            thread: "lead".into(),
+                            detail: json!({"active":active,"ready":true}),
+                        },
+                    ],
+                }))];
+                engine.process(&scope, events, false).unwrap();
+            };
+            update(&mut engine, 2, None, "other-turn");
+            assert_eq!(
+                engine.source_move_status(plan.id).unwrap(),
+                Some(Status::Queued)
+            );
+            assert_eq!(
+                engine.prepare_source_move(&plan, true).unwrap(),
+                Status::Queued
+            );
+            assert!(engine.act(0, "next", &scope, send(), None).is_err());
+            assert!(sent.lock().unwrap().is_empty());
+            update(&mut engine, 3, Some("native-busy"), "t1");
+            assert_eq!(
+                engine.source_move_status(plan.id).unwrap(),
+                Some(Status::Queued)
+            );
+            assert!(engine.check_source_move_action(&scope, &send()).is_ok());
+            assert!(
+                engine
+                    .check_source_move_action(&other_route, &send())
+                    .is_ok()
+            );
+            update(&mut engine, 4, None, "native-busy");
+            assert_eq!(
+                engine.source_move_status(plan.id).unwrap(),
+                Some(Status::Preparing)
+            );
+            assert!(
+                engine
+                    .check_source_move_action(&scope, &Action::SelectThread("lead".into()))
+                    .is_err()
+            );
+            assert!(
+                engine
+                    .check_source_move_action(&scope, &Action::LoadOlder("lead".into()))
+                    .is_ok()
+            );
         }
         fn hosted(scope: &Scope) -> Caller {
             Caller::Hosted {
@@ -6927,11 +7181,23 @@ mod tests {
             Engine,
             std::sync::mpsc::Receiver<ox_desk_core::links::LinkEvent>,
         ) {
+            warm_claude_in(root, root)
+        }
+
+        fn warm_claude_in(
+            root: &Path,
+            project: &Path,
+        ) -> (
+            Scope,
+            String,
+            Engine,
+            std::sync::mpsc::Receiver<ox_desk_core::links::LinkEvent>,
+        ) {
             use ox_desk_core::store::claude::{Launcher, SUBSCRIPTION_PROVIDER};
             // The fixture's journal records the real cwd; macOS temp dirs sit behind /var -> /private/var.
             let root = &root.canonicalize().unwrap();
             let scope = Scope {
-                project: root.to_owned(),
+                project: project.canonicalize().unwrap(),
                 route: Runtime::Claude.route(None),
             };
             let (etx, rx) = std::sync::mpsc::channel();
@@ -6981,6 +7247,539 @@ mod tests {
             let mut engine = Engine::open(config(root), root, tx).unwrap();
             engine.running.insert(scope.clone(), live);
             (scope, lead, engine, rx)
+        }
+
+        fn move_checkout(root: &Path) -> PathBuf {
+            let project = root.join("project");
+            std::fs::create_dir(&project).unwrap();
+            let git = |args: &[&str]| {
+                let result = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&project)
+                    .output()
+                    .unwrap();
+                assert!(
+                    result.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+            };
+            git(&["init", "-q"]);
+            git(&[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "Initial",
+            ]);
+            std::fs::write(project.join("notes"), "laptop draft").unwrap();
+            project.canonicalize().unwrap()
+        }
+
+        #[test]
+        fn a_codex_destination_issues_prepared_only_after_a_native_checkpoint() {
+            use crate::{
+                move_bundle::{Bundle, Presentation, plan_digest},
+                move_ledger::{ArchivePin, Ledger, Proposal, Status},
+                move_target::{Files, VerifiedTarget},
+            };
+            use ox_desk_core::codex::{
+                frame::{Frame, RequestId},
+                reply::Reply,
+            };
+            let laptop = tempfile::tempdir().unwrap();
+            let studio = tempfile::tempdir().unwrap();
+            let (tx, _mailbox) = std::sync::mpsc::sync_channel(32);
+            let mut receiver = Engine::open(config(studio.path()), studio.path(), tx).unwrap();
+            let scope = Scope {
+                project: move_checkout(laptop.path()),
+                route: Route::CODEX_SUBSCRIPTION,
+            };
+            let (tx, _mailbox) = std::sync::mpsc::sync_channel(32);
+            let source = Engine::open(config(laptop.path()), laptop.path(), tx).unwrap();
+            let proposed = move_plan(&source, &scope, "laptop-native");
+            drop(source);
+            let source_host = proposed.source.host;
+            let proposal = Proposal {
+                session: proposed.session,
+                source: proposed.source,
+                project_in_checkout: vec![],
+            };
+            let reserve = |proposal| {
+                VerifiedTarget::reserve_plan(
+                    studio.path(),
+                    &receiver.source_moves.ledger,
+                    source_host,
+                    receiver.host_id,
+                    proposed.id,
+                    proposal,
+                )
+            };
+            assert!(
+                reserve(Proposal {
+                    project_in_checkout: b"../another-project".to_vec(),
+                    ..proposal.clone()
+                })
+                .is_err()
+            );
+            let plan = reserve(proposal).unwrap();
+            let timeline = Timeline {
+                detail: json!({"ready":true}),
+                items: vec![
+                    serde_json::from_value(json!({
+                        "turn":"done", "id":"first", "role":"user", "text":"The earlier work",
+                        "revision":1, "detail":null
+                    }))
+                    .unwrap(),
+                ],
+            };
+            let bundle = Bundle::capture(
+                laptop.path(),
+                &plan,
+                Presentation {
+                    title: "Review the release plan".into(),
+                    updated_at: 42,
+                    last_result: None,
+                    model_provider: "openai".into(),
+                },
+                &timeline,
+            )
+            .unwrap();
+            let manifest = bundle.manifest.sha256().unwrap();
+            let target = VerifiedTarget::install(
+                studio.path(),
+                &receiver.source_moves.ledger,
+                plan.source.host,
+                Files {
+                    directory: bundle.directory(),
+                    manifest: &bundle.manifest,
+                    manifest_sha256: manifest,
+                    expected_plan: Some(plan_digest(&plan).unwrap()),
+                },
+            )
+            .unwrap();
+            let frame = |id, reply| {
+                LinkEvent::Frame(Frame::Reply {
+                    id: RequestId::Number(id),
+                    result: Ok(reply),
+                })
+            };
+            let mut live = local_live(&plan.target_scope);
+            live.store.apply(frame(1, Reply::Acknowledged));
+            live.store.apply(frame(
+                2,
+                Reply::Account(
+                    serde_json::from_value(json!({
+                        "account": {"type":"chatgpt","email":"fixture@example.test"}
+                    }))
+                    .unwrap(),
+                ),
+            ));
+            assert_eq!(live.store.state(), &Connection::Ready);
+            receiver.running.insert(plan.target_scope.clone(), live);
+            let (reply, prepared) = std::sync::mpsc::channel();
+            receiver
+                .prepare_move_target(plan.source.host, target, reply)
+                .unwrap();
+            assert!(prepared.try_recv().is_err());
+            let opened = serde_json::from_value(json!({
+                "thread":{"id":"studio-native","modelProvider":"openai","cwd":plan.target_scope.project},
+                "modelProvider":"openai","model":"stock-model",
+                "sandbox":{"type":"dangerFullAccess"},"approvalPolicy":"on-request",
+                "approvalsReviewer":"user","activePermissionProfile":null,
+            })).unwrap();
+            receiver
+                .process(
+                    &plan.target_scope,
+                    vec![frame(4, Reply::Opened(opened))],
+                    false,
+                )
+                .unwrap();
+            assert!(prepared.try_recv().is_err());
+            receiver
+                .process(
+                    &plan.target_scope,
+                    vec![frame(5, Reply::Acknowledged)],
+                    false,
+                )
+                .unwrap();
+            let prepared = prepared.try_recv().unwrap().unwrap();
+            assert_eq!(prepared.stage.native, "studio-native");
+            assert_eq!(prepared.stage.digest, manifest);
+            assert_eq!(
+                receiver.source_moves.ledger.status(plan.id).unwrap(),
+                Some(Status::Prepared)
+            );
+            assert!(
+                !receiver.running[&plan.target_scope]
+                    .store
+                    .can_send(Some("studio-native"))
+            );
+            let mut source = Ledger::open(laptop.path(), plan.source.host).unwrap();
+            source.prepare_source(&plan).unwrap();
+            source
+                .bind_source_manifest(
+                    &plan,
+                    ArchivePin {
+                        manifest,
+                        transcript: bundle.manifest.transcript.sha256,
+                    },
+                )
+                .unwrap();
+            source
+                .fence_source(plan.target_host, &prepared, None)
+                .unwrap();
+            source.writer_released(&plan).unwrap();
+            let commit = source.commit_source(&plan).unwrap();
+            receiver
+                .activate_move_target(plan.source.host, &commit)
+                .unwrap();
+            assert_eq!(
+                receiver.source_moves.ledger.status(plan.id).unwrap(),
+                Some(Status::Active)
+            );
+            assert!(
+                receiver.running[&plan.target_scope]
+                    .store
+                    .can_send(Some("studio-native"))
+            );
+            let moved = receiver.running[&plan.target_scope]
+                .state
+                .sessions
+                .iter()
+                .find(|row| row.id == "studio-native")
+                .unwrap();
+            assert_eq!(moved.title, "Review the release plan");
+            assert_eq!(moved.detail["logical_session_id"], json!(plan.session));
+            drop(receiver);
+            drop(source);
+            drop(bundle);
+            laptop.close().unwrap();
+            let (tx, _mailbox) = std::sync::mpsc::sync_channel(32);
+            let mut receiver = Engine::open(config(studio.path()), studio.path(), tx).unwrap();
+            let sessions = &receiver.cold[&plan.target_scope].sessions;
+            assert_eq!(sessions[0].title, "Review the release plan");
+            assert_eq!(
+                sessions[0].detail["logical_session_id"],
+                plan.session.to_string()
+            );
+            assert!(receiver.running.is_empty());
+            let history = receiver
+                .read_moved_history(&plan.target_scope, "studio-native", None, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(history.1[0].text, "The earlier work");
+            assert!(
+                receiver
+                    .read_moved_history(&plan.target_scope, "another-session", None, None)
+                    .unwrap()
+                    .is_none()
+            );
+
+            // An acknowledgement of the first move may still be in flight when
+            // a second move advances the same logical session to another host.
+            let ledger = &mut receiver.source_moves.ledger;
+            let (session, owner) = ledger
+                .source_identity(&plan.target_scope, "studio-native")
+                .unwrap();
+            let onward = crate::move_ledger::Plan {
+                id: uuid::Uuid::new_v4(),
+                session,
+                source: owner,
+                target_host: uuid::Uuid::new_v4(),
+                target_scope: plan.source.scope.clone(),
+            };
+            ledger.prepare_source(&onward).unwrap();
+            let second_archive = ArchivePin {
+                manifest: [8; 32],
+                transcript: [9; 32],
+            };
+            ledger
+                .bind_source_manifest(&onward, second_archive)
+                .unwrap();
+            ledger
+                .fence_source(
+                    onward.target_host,
+                    &crate::move_ledger::Prepared {
+                        plan: onward.clone(),
+                        stage: crate::move_ledger::Stage {
+                            digest: second_archive.manifest,
+                            native: "other-native".into(),
+                        },
+                    },
+                    None,
+                )
+                .unwrap();
+            ledger.writer_released(&onward).unwrap();
+            ledger.commit_source(&onward).unwrap();
+            let historical = receiver
+                .activate_move_target(plan.source.host, &commit)
+                .unwrap();
+            assert_eq!(historical.commit, commit);
+            assert_eq!(
+                receiver
+                    .source_moves
+                    .ledger
+                    .owner(plan.session)
+                    .unwrap()
+                    .unwrap()
+                    .host,
+                onward.target_host
+            );
+            assert!(receiver.running.is_empty());
+        }
+
+        #[test]
+        fn a_restarted_source_waits_for_its_fenced_writer_group_to_exit() {
+            use crate::{
+                move_ledger::{ArchivePin, Prepared, Stage, Status},
+                move_writer::WriterGroup,
+            };
+            use std::os::unix::process::CommandExt;
+
+            let root = tempfile::tempdir().unwrap();
+            let (scope, _) = scopes(root.path());
+            let (tx, _mailbox) = std::sync::mpsc::sync_channel(32);
+            let mut source = Engine::open(config(root.path()), root.path(), tx).unwrap();
+            let plan = move_plan(&source, &scope, "lead");
+            let mut child = std::process::Command::new("sleep")
+                .arg("10")
+                .process_group(0)
+                .spawn()
+                .unwrap();
+            let group = WriterGroup::record(child.id()).unwrap();
+            let archive = ArchivePin {
+                manifest: [8; 32],
+                transcript: [9; 32],
+            };
+            let prepared = Prepared {
+                plan: plan.clone(),
+                stage: Stage {
+                    digest: archive.manifest,
+                    native: "other-native".into(),
+                },
+            };
+            let ledger = &mut source.source_moves.ledger;
+            ledger.prepare_source(&plan).unwrap();
+            ledger.bind_source_manifest(&plan, archive).unwrap();
+            ledger
+                .fence_source(plan.target_host, &prepared, Some(group))
+                .unwrap();
+            drop(source);
+
+            let (tx, _mailbox) = std::sync::mpsc::sync_channel(32);
+            let mut recovered = Engine::open(config(root.path()), root.path(), tx).unwrap();
+            assert!(recovered.running.is_empty());
+            recovered.advance_source_moves().unwrap();
+            let still_fenced = recovered.source_moves.ledger.status(plan.id).unwrap();
+            child.kill().unwrap();
+            child.wait().unwrap();
+            assert_eq!(still_fenced, Some(Status::Fenced));
+            recovered.advance_source_moves().unwrap();
+            assert_eq!(
+                recovered.source_moves.ledger.status(plan.id).unwrap(),
+                Some(Status::Committed)
+            );
+            assert!(recovered.running.is_empty());
+            assert!(!recovered.source_moves.ledger.can_write(&scope, "lead"));
+        }
+
+        #[test]
+        fn a_staged_source_move_waits_for_the_native_release_before_commit() {
+            use crate::{
+                move_bundle::{Bundle, Presentation, plan_digest},
+                move_ledger::{ArchivePin, Ledger, Status},
+                move_target::{Files, VerifiedTarget},
+            };
+            let root = tempfile::tempdir().unwrap();
+            let project = move_checkout(root.path());
+            let studio = tempfile::tempdir().unwrap();
+            let (scope, lead, mut engine, rx) = warm_claude_in(root.path(), &project);
+            let mut plan = move_plan(&engine, &scope, &lead);
+            plan.target_host = crate::identity::load(studio.path()).unwrap();
+            plan.target_scope.project = studio
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join(plan.id.to_string())
+                .join("checkout/project");
+            assert_eq!(
+                engine.prepare_source_move(&plan, false).unwrap(),
+                Status::Preparing
+            );
+            assert!(engine.running[&scope].store.has_live_session(&lead));
+            let presentation = Presentation::from(
+                engine.running[&scope]
+                    .state
+                    .sessions
+                    .iter()
+                    .find(|row| row.id == lead)
+                    .unwrap(),
+            );
+            let bundle = Bundle::capture(
+                root.path(),
+                &plan,
+                presentation,
+                engine.move_source_timeline(&plan).unwrap(),
+            )
+            .unwrap();
+            let archive = ArchivePin {
+                manifest: bundle.manifest.sha256().unwrap(),
+                transcript: bundle.manifest.transcript.sha256,
+            };
+            engine.bind_move_manifest(&plan, archive).unwrap();
+            let ledger = Ledger::open(studio.path(), plan.target_host).unwrap();
+            let target = VerifiedTarget::install(
+                studio.path(),
+                &ledger,
+                plan.source.host,
+                Files {
+                    directory: bundle.directory(),
+                    manifest: &bundle.manifest,
+                    manifest_sha256: archive.manifest,
+                    expected_plan: Some(plan_digest(&plan).unwrap()),
+                },
+            )
+            .unwrap();
+            let (_, _, mut receiver, _studio_events) =
+                warm_claude_in(studio.path(), &plan.target_scope.project);
+            let (reply, prepared) = std::sync::mpsc::channel();
+            receiver
+                .prepare_move_target(plan.source.host, target, reply)
+                .unwrap();
+            let prepared = prepared.try_recv().unwrap().unwrap();
+            let native = &prepared.stage.native;
+            assert!(
+                !receiver.running[&plan.target_scope]
+                    .store
+                    .has_live_session(native)
+            );
+            assert!(
+                engine
+                    .stage_source_move(uuid::Uuid::new_v4(), &prepared)
+                    .is_err()
+            );
+            assert_eq!(
+                engine.source_move_status(plan.id).unwrap(),
+                Some(Status::Preparing)
+            );
+            let changed = {
+                let live = engine.running.get_mut(&scope).unwrap();
+                let item = &mut live.state.transcripts.get_mut(&lead).unwrap().items[0];
+                item.text.push('!');
+                item.id.clone()
+            };
+            assert!(
+                engine
+                    .stage_source_move(plan.target_host, &prepared)
+                    .is_err()
+            );
+            assert_eq!(
+                engine
+                    .running
+                    .get_mut(&scope)
+                    .unwrap()
+                    .state
+                    .transcripts
+                    .get_mut(&lead)
+                    .unwrap()
+                    .items
+                    .iter_mut()
+                    .find(|item| item.id == changed)
+                    .unwrap()
+                    .text
+                    .pop(),
+                Some('!')
+            );
+            assert_eq!(
+                engine
+                    .stage_source_move(plan.target_host, &prepared)
+                    .unwrap(),
+                Status::Fenced
+            );
+            assert_eq!(
+                engine.source_move_status(plan.id).unwrap(),
+                Some(Status::Fenced)
+            );
+            assert!(engine.running[&scope].store.has_live_session(&lead));
+            assert!(engine.committed_move(&plan).is_err());
+            pump_engine(&mut engine, &scope, &rx, &|engine| {
+                engine.source_move_status(plan.id).unwrap() == Some(Status::Committed)
+            });
+            assert!(!engine.running[&scope].store.has_live_session(&lead));
+            let commit = engine.committed_move(&plan).unwrap();
+            let activated = receiver
+                .activate_move_target(plan.source.host, &commit)
+                .unwrap();
+            engine.confirm_move(plan.target_host, &activated).unwrap();
+            let target = VerifiedTarget::load(studio.path(), &plan).unwrap();
+            let mut history = target
+                .history_for(&receiver.source_moves.ledger, &plan.target_scope, native)
+                .unwrap();
+            assert!(
+                history
+                    .previous(None, 100)
+                    .unwrap()
+                    .0
+                    .iter()
+                    .any(|item| item.text.contains("lead first turn"))
+            );
+            assert_eq!(
+                std::fs::read_to_string(plan.target_scope.project.join("notes")).unwrap(),
+                "laptop draft"
+            );
+            drop(engine);
+            let continued = target
+                .claude_request(
+                    &receiver.source_moves.ledger,
+                    &plan.target_scope,
+                    native,
+                    "Continue on Studio",
+                )
+                .unwrap();
+            assert!(continued.contains("lead first turn"));
+            assert!(continued.ends_with("Continue on Studio"));
+            assert!(
+                !receiver.running[&plan.target_scope]
+                    .store
+                    .has_live_session(native)
+            );
+            receiver
+                .act(
+                    0,
+                    "first-on-destination",
+                    &plan.target_scope,
+                    Action::SendText(Some(native.clone()), "Continue on Studio".into()),
+                    None,
+                )
+                .unwrap();
+            let live = receiver.running.get_mut(&plan.target_scope).unwrap();
+            assert!(live.store.has_live_session(native));
+            assert!(
+                live.store
+                    .start_claude_move_turn(
+                        &plan.id.to_string(),
+                        native,
+                        "Do not repeat".into(),
+                        None
+                    )
+                    .is_err()
+            );
+
+            let (tx, _mailbox) = std::sync::mpsc::sync_channel(32);
+            let engine = Engine::open(config(root.path()), root.path(), tx).unwrap();
+            assert_eq!(
+                engine.source_move_status(plan.id).unwrap(),
+                Some(Status::Confirmed)
+            );
+            assert!(
+                engine
+                    .check_source_move_action(&scope, &Action::SelectThread(lead))
+                    .is_err()
+            );
         }
         /// Start one session worker from `lead` on the lead's own warm route and drive the
         /// host until its launch answers.

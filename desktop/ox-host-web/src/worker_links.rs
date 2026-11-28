@@ -118,7 +118,8 @@ pub(super) fn execute(app: &App, device: Option<&str>, action: Action) -> io::Re
                 .filter(|d| device.is_none_or(|id| state.belongs_to_login(id, &d.login)))
                 .collect::<Vec<_>>();
             Ok(
-                json!({"hosts":rows.iter().map(describe).collect::<Vec<_>>(), "available":known, "incoming":incoming}),
+                json!({"hosts":rows.iter().map(describe).collect::<Vec<_>>(), "available":known, "incoming":incoming,
+                    "supports_session_moves": app.moves.is_some()}),
             )
         }
         Action::LinkPairedHost { host } => {

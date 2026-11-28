@@ -178,6 +178,7 @@
               <section id="menu-session" class="menu-section" aria-label="Session" hidden>
                 <p class="menu-heading">Session</p>
                 <button type="button" id="menu-stop" hidden>Stop</button>
+                <button type="button" id="menu-move" aria-haspopup="dialog" hidden>Move to another host…</button>
                 <div id="thread-actions" class="menu-items"></div>
               </section>
               <section id="menu-workers" class="menu-section" aria-label="Handoff" hidden>
@@ -197,6 +198,28 @@
         <div id="context"></div>
         <h1 id="title"></h1>
         <div id="confirm-slot" class="confirm-slot" hidden></div>
+        <section id="move-progress" aria-label="Move status" hidden>
+          <div aria-live="polite" aria-atomic="true">
+            <h2 id="move-progress-title" tabindex="-1"></h2>
+            <p id="move-progress-detail"></p>
+          </div>
+          <div id="move-progress-actions"></div>
+        </section>
+        <dialog id="move-dialog" aria-labelledby="move-title">
+          <form id="move-form">
+            <h2 id="move-title">Move to another host</h2>
+            <p id="move-source"></p>
+            <label for="move-destination">Continue on</label>
+            <select id="move-destination" required></select>
+            <p id="move-destination-detail"></p>
+            <p id="move-note" role="status" hidden></p>
+            <button type="button" id="move-host-links" class="quiet" hidden>Manage host links</button>
+            <div class="actions">
+              <button type="button" id="move-cancel" class="quiet">Cancel</button>
+              <button type="submit" id="move-submit">Move after this turn</button>
+            </div>
+          </form>
+        </dialog>
         <div id="handoff-marks" class="handoff-marks" hidden></div>
         <details id="worker-results" class="worker-results" hidden>
           <summary id="worker-results-title">Workers</summary>

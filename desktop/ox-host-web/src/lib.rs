@@ -25,11 +25,15 @@ mod state;
 #[cfg(feature = "server")]
 pub mod worker_checkout;
 #[cfg(feature = "server")]
-pub use server::{run, run_with_jobs};
+pub use server::{run, run_with_jobs, run_with_receivers};
 #[cfg(feature = "server")]
 pub mod linked_jobs;
 #[cfg(feature = "server")]
 pub mod memory_sync;
+#[cfg(feature = "server")]
+pub mod move_manifest;
+#[cfg(feature = "server")]
+pub mod move_transport;
 #[cfg(feature = "server")]
 pub mod worker_result;
 

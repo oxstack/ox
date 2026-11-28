@@ -111,6 +111,7 @@ pub struct Workbench {
     thread_edit: Option<thread_menu::ThreadEdit>,
     pub(super) launch_request: Option<super::worker_sheet::LaunchKind>,
     pub(super) launch: Option<super::worker_sheet::Launch>,
+    pub(super) move_picker: Option<super::session_move::Picker>,
     pub(super) launch_picker: Option<(
         super::worker_sheet::LaunchKind,
         Entity<super::model_picker::ModelPicker>,
@@ -302,6 +303,7 @@ impl Workbench {
             picker_dismissed: None,
             launch_request: None,
             launch: None,
+            move_picker: None,
             launch_picker: None,
             front,
             query: String::new(),
@@ -1125,12 +1127,20 @@ impl Workbench {
         if self.pending_row_action.is_some() {
             self.finish_pending_row_action(window, cx);
         }
-        let controls = self.thread_menu(cx);
-        let start_worker = self.start_worker_button(p, cx);
+        let move_button = self.live_move_button(p, cx);
+        let move_panel = self.live_move_panel(p, cx);
+        let source_reserved = self.live_move_locked();
+        let move_pending = self.live_move_pending();
+        let controls = (!move_pending).then(|| self.thread_menu(cx)).flatten();
+        let start_worker = (!move_pending)
+            .then(|| self.start_worker_button(p, cx))
+            .flatten();
         let review_toggle = self.review_toggle(cx);
         let inline_request = self.pane_width < px(825.);
         let asks = self.ask_sheet(inline_request, window, cx);
-        let launch = self.launch_sheet(window.viewport_size().height * 0.6, cx);
+        let launch = (!source_reserved)
+            .then(|| self.launch_sheet(window.viewport_size().height * 0.6, cx))
+            .flatten();
         let usage = self.usage_bar(cx);
         let review = asks.is_none().then(|| self.review_panel(cx)).flatten();
         let review_width = px(self.review_width as f32 + 5.);
@@ -1149,6 +1159,7 @@ impl Workbench {
             && let Some(id) = store.selected()
         {
             if !narrow_review
+                && !source_reserved
                 && restore_probe::wants(id, Milestone::ComposerReady)
                 && store.can_compose(Some(id))
             {
@@ -1163,7 +1174,7 @@ impl Workbench {
                 restore_probe::mark(Milestone::ThreadLive);
             }
         }
-        let terminal = (status == "Connected").then(|| {
+        let terminal = (status == "Connected" && !source_reserved).then(|| {
             let project = self.project.clone();
             crate::kit::icon(
                 p,
@@ -1339,6 +1350,7 @@ impl Workbench {
                                         .children(review_toggle)
                                         .children(terminal)
                                         .children(start_worker)
+                                        .children(move_button)
                                         .children(controls),
                                 ),
                         )
@@ -1419,7 +1431,7 @@ impl Workbench {
                                 .w_full()
                                 .max_w(px(if ready { 680. } else { 760. }))
                                 .gap(px(SPACE_S))
-                                .children(activity_status)
+                                .children(activity_status.filter(|_| !source_reserved))
                                 .children(self.workers_line(p, cx))
                                 .when_some(self.worker_update.as_deref(), |line, update| {
                                     line.child(crate::platform::layout_probe::mark_element(
@@ -1430,8 +1442,9 @@ impl Workbench {
                                     ))
                                 })
                                 .children(launch)
+                                .children(move_panel)
                                 .children(inline_sheet)
-                                .child(composer)
+                                .when(!source_reserved, |dock| dock.child(composer))
                                 .children(usage);
                             let dock = row().w_full().justify_center().child(dock);
                             if ready {

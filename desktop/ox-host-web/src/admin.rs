@@ -74,6 +74,9 @@ pub enum Request {
         /// `None` leaves the link's memory-sync grant unchanged.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         may_sync_memory: Option<bool>,
+        /// `None` leaves the destination's session-move permission unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        may_accept_moves: Option<bool>,
     },
     WorkerInvitation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -120,6 +123,9 @@ pub struct WorkerGrant {
     /// receiving host grants it explicitly.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub may_sync_memory: bool,
+    /// A destination opt-in tied to this paired key.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub may_accept_moves: bool,
     pub ceiling: ox_desk_core::modes::Level,
 }
 
