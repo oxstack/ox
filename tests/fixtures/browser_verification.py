@@ -13,6 +13,7 @@ import tempfile
 from threading import Thread
 from time import perf_counter, sleep
 import urllib.request
+from urllib.parse import urlsplit
 
 
 PAGE = b"""<!doctype html>
@@ -82,6 +83,7 @@ PAGE = b"""<!doctype html>
       title.value = '';
       localStorage.removeItem('draft');
       await loadIssues();
+      history.pushState({}, '', '/issues/open?view=detail#latest');
       status.textContent = 'Issue created.';
     };
     loadIssues();
@@ -103,16 +105,17 @@ class IssueTracker(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path == "/issues":
+        path = urlsplit(self.path).path
+        if path == "/issues":
             self.reply(200, "application/json", json.dumps(self.server.issues).encode())
-        elif self.path in ("/external", "/dev-redirect"):
-            location = ("http://example.invalid/" if self.path == "/external" else
+        elif path in ("/external", "/dev-redirect"):
+            location = ("http://example.invalid/" if path == "/external" else
                         f"http://ox-dev.localhost:{self.server.server_port}/")
             self.send_response(302)
             self.send_header("Location", location)
             self.send_header("Content-Length", "0")
             self.end_headers()
-        elif self.path == "/":
+        elif path in ("/", "/issues/open"):
             self.reply(200, "text/html; charset=utf-8", PAGE)
         else:
             self.reply(404, "text/plain", b"Not found")
@@ -200,14 +203,19 @@ def verify(args, server, home):
         return (perf_counter() - start) * 1000, completed
 
     assert run("preview", check=False)[1].returncode == 2
+    missing_url = run("url", check=False)[1]
+    assert missing_url.returncode == 2 and not missing_url.stdout
     setup_ms, _ = run("install")
     assert run("preview", check=False)[1].returncode == 3
     assert run("snapshot", check=False)[1].returncode == 1
+    closed_url = run("url", check=False)[1]
+    assert closed_url.returncode == 3 and not closed_url.stdout
     assert run("close")[1].returncode == 0
     assert process_tree_memory(cache)["browser_process_tree_rss_mib"] == 0
     try:
         open_ms, _ = run("open", url)
         first_snapshot_ms, snapshot = run("snapshot", cwd=subdir)
+        assert run("url", cwd=subdir)[1].stdout == f"{url}/\n"
         title_ref = ref(snapshot.stdout, "textbox", "Issue title")
         create_ref = ref(snapshot.stdout, "button", "Create issue")
         _, output = run("preview")
@@ -235,9 +243,10 @@ def verify(args, server, home):
         # Same worktree, a different conversation. Then same label, different worktree.
         run("open", url, session="second")
         assert title not in run("snapshot", session="second")[1].stdout
-        run("open", url, cwd=other)
+        run("open", f"{url}/?worktree=other", cwd=other)
         assert title not in run("snapshot", cwd=other)[1].stdout
         assert title in run("snapshot", cwd=subdir)[1].stdout
+        assert run("url", cwd=other)[1].stdout == f"{url}/?worktree=other\n"
 
         run("click", create_ref)
         # A click can complete before the app's fetch and resulting DOM update.
@@ -250,6 +259,9 @@ def verify(args, server, home):
         assert title in server.issues, saved.stdout
         assert "Issue created." in saved.stdout, saved.stdout
         assert title in saved.stdout
+        assert run("url", cwd=subdir)[1].stdout == f"{url}/issues/open?view=detail#latest\n"
+        assert run("url", cwd=other)[1].stdout == f"{url}/?worktree=other\n"
+        assert run("url", session="second")[1].stdout == f"{url}/\n"
         run("screenshot", str(args.artifacts / "issue-created.png"), cwd=subdir)
         assert (args.artifacts / "issue-created.png").read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
         assert "Project issues" in json.dumps(json.loads(run("snapshot", "--json")[1].stdout))
@@ -257,9 +269,12 @@ def verify(args, server, home):
         assert "Project issues" in run("snapshot")[1].stdout
         _, redirected = run("open", f"{url}/external", check=False)
         assert redirected.returncode and "blocked by the domain filter" in redirected.stderr, redirected
+        assert "example.invalid" not in run("url", check=False)[1].stdout
 
         run("close")
         assert run("preview", check=False)[1].returncode == 3
+        closed_url = run("url", check=False)[1]
+        assert closed_url.returncode == 3 and not closed_url.stdout
         assert run("snapshot", check=False)[1].returncode == 1
         assert "Project issues" in run("snapshot", session="second")[1].stdout
         run("open", url)
@@ -276,15 +291,23 @@ def verify(args, server, home):
         run("open", f"{url}/dev-redirect", allow_host=dev_host)
         _, trusted = run("snapshot", allow_host=dev_host)
         assert "Project issues" in trusted.stdout
+        assert run("url", allow_host=dev_host)[1].stdout == f"{dev_url}/\n"
+        wrong_host = run("url", allow_host="other.localhost", check=False)[1]
+        assert wrong_host.returncode == 3 and not wrong_host.stdout
+        assert dev_host not in run("url", check=False)[1].stdout
         assert run("preview", allow_host=dev_host)[1].stdout != run("preview")[1].stdout
         assert run("open", dev_url, allow_host="other.localhost", check=False)[1].returncode
         _, redirected = run("open", f"{url}/external", allow_host=dev_host, check=False)
         assert redirected.returncode and "blocked by the domain filter" in redirected.stderr, redirected
+        assert "example.invalid" not in run("url", allow_host=dev_host, check=False)[1].stdout
         run("close", allow_host=dev_host)
         assert run("preview", allow_host=dev_host, check=False)[1].returncode == 3
+        closed_url = run("url", allow_host=dev_host, check=False)[1]
+        assert closed_url.returncode == 3 and not closed_url.stdout
         # The original scope is still running after the explicitly opted-in one closes.
         run("open", url)
         assert "Project issues" in run("snapshot")[1].stdout
+        assert run("url")[1].stdout == f"{url}/\n"
     finally:
         run("close", check=False)
         run("close", allow_host="ox-dev.localhost", check=False)
@@ -298,7 +321,8 @@ def verify(args, server, home):
         "warm_click_median_ms": round(median(click_times), 2),
         **memory,
         "checked": ["validation and repair", "server save", "worktree and session isolation",
-                    "live preview", "screenshot", "URL scope", "trusted host override", "close and reopen"],
+                    "live preview", "screenshot", "current URL after SPA navigation",
+                    "URL scope", "trusted host override", "close and reopen"],
     }, indent=2))
 
 

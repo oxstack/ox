@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
 mod component;
+mod page_url;
 
 use component::{Component, Installed};
 const LOCAL_HOSTS: &str = "localhost,127.0.0.1,[::1]";
@@ -37,6 +38,7 @@ Usage: ox browser [--session NAME] [--allow-host HOST] <command>
 
   install [--allow-fresh]         Install or refresh the browser component
   open http://localhost:3000      Open your local app
+  url                             Print the URL of the current page
   snapshot [--json]               Read the page and get element references
   fill @e1 TEXT                   Fill a field from the latest snapshot
   click @e2                       Click an element from the latest snapshot
@@ -61,6 +63,7 @@ enum Action<'a> {
     Help,
     Install { allow_fresh: bool },
     Open(Url),
+    CurrentUrl,
     Snapshot { json: bool },
     Fill(&'a OsStr, &'a str),
     Click(&'a OsStr),
@@ -97,6 +100,7 @@ fn parse(mut args: &[OsString]) -> Result<(Scope<'_>, Action<'_>), RelayError> {
             url.to_str().ok_or("The URL must be UTF-8.")?,
             allowed_host.as_deref(),
         )?),
+        [arg] if arg == "url" => Action::CurrentUrl,
         [arg] if arg == "snapshot" => Action::Snapshot { json: false },
         [arg, flag] if arg == "snapshot" && flag == "--json" => Action::Snapshot { json: true },
         [arg, reference, text] if arg == "fill" => Action::Fill(
@@ -480,6 +484,7 @@ pub(crate) async fn run(args: &[OsString]) -> Result<u8, RelayError> {
             None => {
                 return match action {
                     Action::Preview => Ok(preview_unavailable()),
+                    Action::CurrentUrl => Ok(page_url_unavailable()),
                     Action::Close => Ok(0),
                     _ => {
                         Err("Open your app with ox browser open before using this session.".into())
@@ -511,6 +516,13 @@ pub(crate) async fn run(args: &[OsString]) -> Result<u8, RelayError> {
         Action::Open(url) => {
             write_private_file(&states.join(&session), component.id())?;
             command.args(["open", url.as_str()]);
+        }
+        Action::CurrentUrl => {
+            if let Some(url) = page_url::read(command, scope.allowed_host.as_deref()).await? {
+                println!("{url}");
+                return Ok(0);
+            }
+            return Ok(page_url_unavailable());
         }
         Action::Snapshot { json } => {
             command.args(["snapshot", "--compact"]);
@@ -596,9 +608,14 @@ fn preview_unavailable() -> u8 {
     3
 }
 
+fn page_url_unavailable() -> u8 {
+    eprintln!("ox: Open your app with ox browser open before reading its URL.");
+    3
+}
+
 fn component_unavailable(action: &Action<'_>) -> Result<u8, RelayError> {
     let message = format!("OX Browser is not installed.\n  {INSTALL_HINT}");
-    if matches!(action, Action::Preview) {
+    if matches!(action, Action::Preview | Action::CurrentUrl) {
         eprintln!("ox: {message}");
         return Ok(2);
     }
