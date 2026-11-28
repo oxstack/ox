@@ -1,5 +1,7 @@
 //! Select, verify, and activate the optional upstream native component.
 
+mod local;
+
 use super::{
     DOWNLOAD_ENV, INSTALL_HINT, LOCAL_HOSTS, child_command, exit_code, private_executable,
     read_private_file, write_private_file,
@@ -292,6 +294,44 @@ fn verify_binary(path: &Path, asset: &Asset) -> io::Result<bool> {
     Ok(hex::encode(sha.finish()) == asset.sha256)
 }
 
+struct BinaryStage {
+    file: tempfile::NamedTempFile,
+    sha: digest::Context,
+    remaining: u64,
+}
+
+impl BinaryStage {
+    fn new(root: &Path, asset: &Asset) -> io::Result<Self> {
+        Ok(Self {
+            file: tempfile::NamedTempFile::new_in(root)?,
+            sha: digest::Context::new(&digest::SHA256),
+            remaining: asset.size,
+        })
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> io::Result<bool> {
+        let Some(remaining) = self.remaining.checked_sub(bytes.len() as u64) else {
+            return Ok(false);
+        };
+        self.file.write_all(bytes)?;
+        self.sha.update(bytes);
+        self.remaining = remaining;
+        Ok(true)
+    }
+
+    fn publish(self, asset: &Asset, dest: &Path) -> Result<bool, RelayError> {
+        if self.remaining != 0 || hex::encode(self.sha.finish()) != asset.sha256 {
+            return Ok(false);
+        }
+        self.file
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o700))?;
+        self.file.as_file().sync_all()?;
+        self.file.persist(dest)?;
+        Ok(true)
+    }
+}
+
 async fn download(
     client: &reqwest::Client,
     root: &Path,
@@ -308,25 +348,15 @@ async fn download(
         )
         .into());
     }
-    let mut stage = tempfile::NamedTempFile::new_in(root)?;
-    let mut sha = digest::Context::new(&digest::SHA256);
-    let mut bytes = 0;
+    let mut stage = BinaryStage::new(root, asset)?;
     while let Some(chunk) = response.chunk().await? {
-        bytes += chunk.len() as u64;
-        if bytes > asset.size {
+        if !stage.append(&chunk)? {
             return Err("agent-browser download exceeds its published size.".into());
         }
-        stage.write_all(&chunk)?;
-        sha.update(&chunk);
     }
-    if bytes != asset.size || hex::encode(sha.finish()) != asset.sha256 {
+    if !stage.publish(asset, dest)? {
         return Err("agent-browser download failed SHA-256 verification.".into());
     }
-    stage
-        .as_file()
-        .set_permissions(fs::Permissions::from_mode(0o700))?;
-    stage.as_file().sync_all()?;
-    stage.persist(dest)?;
     Ok(())
 }
 
@@ -438,7 +468,16 @@ pub(super) async fn install(root: &Path, allow_fresh: bool) -> Result<u8, RelayE
     let component = asset.component();
     let dest = component.path(root);
     if !private_executable(&dest)? || !verify_binary(&dest, &asset)? {
-        download(&client, root, &asset, &dest).await?;
+        if let Some(path) = env::var_os("PATH")
+            && local::reuse(root, &asset, &dest, &path)?
+        {
+            println!(
+                "Using a verified local copy of agent-browser {}.",
+                asset.version
+            );
+        } else {
+            download(&client, root, &asset, &dest).await?;
+        }
     }
     check_contract(root, &component, &asset.version).await?;
 
