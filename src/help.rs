@@ -47,9 +47,9 @@ Run stock OpenCode with the providers you configured in OX.
   ox opencode run --model ox/provider/model-id \"Your task\"   Run a single task
   ox opencode run --continue \"Continue from here\"           Resume the last session
 
-Install stock OpenCode 1.x from https://opencode.ai/download and put opencode
-on PATH. Tested with 1.19.6. Run ox setup to configure an API provider. Use the
-ox/ prefix shown by models. OpenCode stores these sessions in its OX profile.
+OX uses the opencode executable on PATH. If you need to install it, visit
+https://opencode.ai/download. Run ox setup to configure an API provider.
+Use the ox/ prefix shown by models. Sessions are stored in the OX profile.
 
 For scripted runs, add --format json to the run command.
 Run opencode --help for the stock command reference.";
