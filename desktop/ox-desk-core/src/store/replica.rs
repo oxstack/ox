@@ -124,8 +124,7 @@ impl Store {
     pub fn actual_model(&self, id: &str) -> Option<&str> {
         self.session_mark(id, "worker_model")?["actual_model"].as_str()
     }
-    /// A host mark on a session: `handed_off_to`, `handoff_attempts`,
-    /// `yolo_grant`, `yolo_children` or `worker_model`.
+    /// A host mark on a session, such as `linked_workers` or `worker_model`.
     pub fn session_mark(&self, id: &str, key: &str) -> Option<&Value> {
         self.remote()?
             .marks
@@ -848,6 +847,7 @@ impl Store {
             "yolo_grant_expires",
             "yolo_children",
             "worker_model",
+            "linked_workers",
             "memory_attachment",
         ]
         .into_iter()

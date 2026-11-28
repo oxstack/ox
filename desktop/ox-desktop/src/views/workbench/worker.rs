@@ -5,9 +5,11 @@ use super::{OpenThread, Workbench};
 use crate::appearance::Palette;
 use crate::appearance::Step;
 use crate::views::host::ParentLink;
+use crate::views::worker_sheet::OpenWorkerHosts;
 use crate::{activity, col, kit::button, row};
 use gpui::{prelude::FluentBuilder, *};
 use ox_desk_core::host_protocol::{Scope, SessionOutcome};
+use ox_desk_core::origin::LinkedWorkerSummary;
 
 impl Workbench {
     /// The recorded parent of an open worker. The launch stamp carries the
@@ -174,14 +176,21 @@ impl Workbench {
             route: self.route.clone(),
         };
         let owner = id.to_owned();
-        let index = self.workers.read(cx);
-        if let Some(workers) = index.results.get(&(scope, owner.clone())) {
+        let workers = self
+            .workers
+            .read(cx)
+            .results
+            .get(&(scope, owner.clone()))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let linked: Vec<LinkedWorkerSummary> = store
+            .session_mark(id, "linked_workers")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default();
+        let count = workers.len() + linked.len();
+        if count > 0 {
             let is_open = self.worker_results_open.as_deref() == Some(id);
-            let label = format!(
-                "Workers ({}) {}",
-                workers.len(),
-                if is_open { "▾" } else { "▸" }
-            );
+            let label = format!("Workers ({count}) {}", if is_open { "▾" } else { "▸" });
             let mut panel = col().gap_1().child(row().child(button(
                 p,
                 "worker-results-toggle",
@@ -196,7 +205,7 @@ impl Workbench {
             if is_open {
                 let mut list = col()
                     .id("worker-results")
-                    .max_h(px(160.))
+                    .max_h(px(190.))
                     .overflow_y_scroll()
                     .p_2()
                     .gap_1()
@@ -229,6 +238,9 @@ impl Workbench {
                             )))
                             .child(crate::small(p, meta)),
                     );
+                }
+                for worker in linked {
+                    list = list.child(self.linked_worker_result(worker, p, cx));
                 }
                 panel = panel.child(list);
             }
@@ -296,5 +308,58 @@ impl Workbench {
                 })
                 .into_any_element(),
         )
+    }
+
+    fn linked_worker_result(
+        &self,
+        worker: LinkedWorkerSummary,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let workspace = self.workspace.clone();
+        let destination = worker.target.as_ref().and_then(|target| {
+            workspace.as_ref()?.upgrade()?.read(cx).linked_session(
+                &worker.host,
+                &target.scope,
+                &target.session,
+                cx,
+            )
+        });
+        let mut meta = format!("{} · {}", worker.status_label(), worker.route.label());
+        if let Some(ceiling) = worker.ceiling {
+            meta.push_str(&format!(
+                " · {} ceiling",
+                ceiling.label(worker.route.runtime)
+            ));
+        }
+        if let Some(model) = &worker.actual_model {
+            meta.push_str(&format!(" · {model}"));
+        }
+        let title = worker
+            .title
+            .unwrap_or_else(|| format!("Worker #{}", worker.job));
+        let label = format!("{title} on {}", worker.name);
+        col()
+            .gap_1()
+            .child(row().child(button(
+                p,
+                ("linked-worker-result", worker.job),
+                label,
+                false,
+                true,
+                cx.listener(move |_, _, window, cx| {
+                    if let Some((workspace, destination)) = workspace
+                        .as_ref()
+                        .and_then(WeakEntity::upgrade)
+                        .zip(destination.as_ref())
+                    {
+                        workspace.update(cx, |s, cx| s.open_destination(destination, window, cx));
+                    } else {
+                        cx.emit(OpenWorkerHosts);
+                    }
+                }),
+            )))
+            .child(crate::small(p, meta))
+            .into_any_element()
     }
 }
