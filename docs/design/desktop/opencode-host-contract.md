@@ -8,7 +8,7 @@ The hosted implementation uses the HTTP session API in stock OpenCode. The initi
 python3 desktop/tests/opencode_host_contract.py /path/to/opencode /path/to/ox
 ```
 
-The fixture starts the real OpenCode server and passes an OX alias through the real Rust gateway to a temporary Messages provider. It uses isolated Git repositories, local authentication, and synthetic credentials. Run it on the exact release before changing the runtime pin.
+The fixture starts the real OpenCode server and passes an OX alias through the real Rust gateway to a temporary Messages provider. It uses isolated Git repositories, local authentication, and synthetic credentials. Run it against the installed executable and record the version with the results.
 
 - **Session identity.** OpenCode's authenticated loopback server created, read, and reopened the same session after process restart. The project directory routes the request. The same authenticated client could read a known session ID using another repository directory in the same data store. An independent OpenCode store returned 404.
 - **History and events.** An asynchronous prompt streamed text. After disconnect, a bounded history query recovered the missed text and identified the same part. Reconnecting with `Last-Event-ID` did not replay the old delta before the next turn. History pagination supplied a cursor for the previous page. [OpenCode session API](https://github.com/anomalyco/opencode/blob/v1.19.6/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts) · [Event implementation](https://github.com/anomalyco/opencode/blob/v1.19.6/packages/opencode/src/server/routes/instance/httpapi/handlers/event.ts)
@@ -26,7 +26,7 @@ The stock binary also advertises ACP. In the tested 1.19.6 implementation, ACP l
 
 ## Independently tested Rust adapter
 
-The adapter lives in the host package and reuses its existing blocking HTTP transport and OX's shared bounded SSE parser. It prepares separate cache, config, data, and state directories for each canonical owner. It takes the loopback address and authentication secret from the caller that started the child. It checks the supported version and compares the native project, config, and state paths with that owner's profile before it accepts requests.
+The adapter lives in the host package and reuses its existing blocking HTTP transport and OX's shared bounded SSE parser. It prepares separate cache, config, data, and state directories for each canonical owner. It takes the loopback address and authentication secret from the caller that started the child. Before accepting requests, it checks the health, status and permission responses, confirms the server requires authentication, and compares the native project, config and state paths with the owner's profile.
 
 ```sh
 cargo test --locked --manifest-path desktop/Cargo.toml -p ox-host --lib
