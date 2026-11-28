@@ -251,7 +251,7 @@ fn open_lock_file(store: &Path) -> Result<File, RelayError> {
         .map_err(|e| write_error(store, e).into())
 }
 
-fn store_lock(store: &Path, background: bool) -> Result<File, RelayError> {
+pub(crate) fn store_lock(store: &Path, background: bool) -> Result<File, RelayError> {
     let file = open_lock_file(store)?;
     // Manual operations wait for the download (15 minutes) and bounded host
     // drain (10 minutes). Background pollers leave the current owner alone.
@@ -459,7 +459,11 @@ pub(crate) async fn run(args: &[OsString]) -> Result<u8, RelayError> {
 }
 
 fn release_client() -> Result<Client, RelayError> {
-    Ok(Client::builder()
+    Ok(release_client_builder().build()?)
+}
+
+pub(crate) fn release_client_builder() -> reqwest::ClientBuilder {
+    Client::builder()
         .user_agent(format!("ox/{CURRENT}"))
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(120))
@@ -470,7 +474,6 @@ fn release_client() -> Result<Client, RelayError> {
                 attempt.follow()
             }
         }))
-        .build()?)
 }
 
 fn target_triple(os: &str, arch: &str) -> Option<&'static str> {

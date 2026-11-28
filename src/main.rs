@@ -6,6 +6,7 @@
 
 mod adapt;
 mod adapters;
+mod browser;
 mod catalog;
 mod claude_frontend;
 mod claude_gateway;
@@ -181,6 +182,9 @@ async fn launch(args: impl Iterator<Item = OsString>) -> Result<u8, RelayError> 
     }
     if args.first().is_some_and(|arg| arg == "desktop") {
         return desktop_launch::run(&args[1..]);
+    }
+    if args.first().is_some_and(|arg| arg == "browser") {
+        return browser::run(&args[1..]).await;
     }
     if args.first().is_some_and(|arg| arg == "ps") {
         return ps::run_ps(&args[1..]);
@@ -507,7 +511,7 @@ const NO_PROVIDER: &str = "no ox API provider configured. Run `ox setup` to add 
 
 const OX_COMMANDS: &[&str] = &[
     "setup", "doctor", "provider", "serve", "update", "weather", "login", "help", "codex",
-    "claude", "opencode",
+    "claude", "browser", "opencode",
 ];
 /// Stock Codex subcommands that `ox <word>` forwards unchanged.
 const CODEX_COMMANDS: &[&str] = &[

@@ -12,6 +12,7 @@ Get started
   ox opencode        Open stock OpenCode with your OX API models
   ox desktop [dir]   Open the project in OX Desktop
   ox host <action>   Install, inspect or uninstall the per-user session host
+  ox help browser    Verify and watch a local app
 
 If something is off
   ox doctor          Check everything. The last line is the next command to run
@@ -30,7 +31,7 @@ More
   ox login chatgpt|claude              Sign in with a ChatGPT or Claude plan
   ox serve [--port PORT]               Share one gateway with desktop apps and devices
   ox update [--check]                  Install or check for the newest ox release
-  ox help [install|setup|settings|desktop|share|t3|subscriptions|opencode]
+  ox help [browser|install|setup|settings|desktop|share|t3|subscriptions|opencode]
   ox --version
 
 Providers live in codeox.toml in your Codex home; ox doctor prints the path.
@@ -273,6 +274,7 @@ Releases: https://github.com/oxstack/ox/releases
 Manual download steps and platform filenames are in docs/configuration.md.";
 
 const HELP_TOPICS: &[&str] = &[
+    "browser",
     "install",
     "setup",
     "settings",
@@ -302,7 +304,7 @@ End sessions on the OX host. A thread stays resumable after it ends.
 A running session loses its current turn when it ends. ox ps lists the ids.";
 
 const TOPICS: &str =
-    "Usage: ox help [install|setup|settings|desktop|share|t3|subscriptions|opencode]";
+    "Usage: ox help [browser|install|setup|settings|desktop|share|t3|subscriptions|opencode]";
 
 pub(crate) fn overview() {
     println!("{OVERVIEW}");
@@ -314,6 +316,7 @@ pub(crate) fn dispatch(args: &[OsString]) -> Option<Result<u8, RelayError>> {
         [command] if command == "help" => overview(),
         [command] if command == "login" => println!("{SUBSCRIPTIONS}"),
         [command, topic] if command == "help" => match topic.to_str() {
+            Some("browser") => crate::browser::print_usage(),
             Some("install") => println!("{INSTALL}"),
             Some("setup") => return Some(crate::setup::print_setup_help()),
             Some("settings") => println!("{SETTINGS}"),
